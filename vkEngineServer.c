@@ -1,5 +1,13 @@
+#ifdef WIN32
 #include <Windows.h>
 #include <conio.h>
+#else
+#include <unistd.h>
+#include <sys/time.h>
+#include <time.h>
+#include <fcntl.h>
+#include <termios.h>
+#endif
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -51,7 +59,7 @@ typedef struct
 	uint32_t Address;
 	uint16_t Port;
 	bool isConnected;
-	int32_t TTL;
+	double TTL;
 
 	NetCamera_t Camera;
 } Client_t;
@@ -65,6 +73,60 @@ Socket_t SendSocket;
 Socket_t RecvSocket;
 uint32_t seed=0;
 
+// Get current time with best possible precision
+double GetClock(void)
+{
+#ifdef WIN32
+	static uint64_t Frequency=0;
+	uint64_t Count;
+
+	if(!Frequency)
+		QueryPerformanceFrequency((LARGE_INTEGER *)&Frequency);
+
+	QueryPerformanceCounter((LARGE_INTEGER *)&Count);
+
+	return (double)Count/Frequency;
+#else
+	struct timespec ts;
+
+	if(!clock_gettime(CLOCK_MONOTONIC, &ts))
+		return ts.tv_sec+(double)ts.tv_nsec/1000000000.0;
+
+	return 0.0;
+#endif
+}
+
+#ifndef WIN32
+// kbhit for *nix
+int _kbhit(void)
+{
+	struct termios oldt, newt;
+	int ch;
+	int oldf;
+
+	tcgetattr(STDIN_FILENO, &oldt);
+	newt=oldt;
+	newt.c_lflag&=~(ICANON|ECHO);
+	tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+	oldf=fcntl(STDIN_FILENO, F_GETFL, 0);
+	fcntl(STDIN_FILENO, F_SETFL, oldf|O_NONBLOCK);
+
+	ch=getchar();
+
+	tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+	fcntl(STDIN_FILENO, F_SETFL, oldf);
+
+	if(ch!=EOF)
+	{
+		ungetc(ch, stdin);
+		return 1;
+	}
+
+	return 0;
+}
+#endif
+
+// Add address/port to client list, return clientID
 uint32_t addClient(uint32_t Address, uint16_t Port)
 {
 	// Lobby is full, can't add more clients
@@ -95,6 +157,7 @@ uint32_t addClient(uint32_t Address, uint16_t Port)
 	return newClientID;
 }
 
+// Remove client ID from client list
 void delClient(uint32_t ID)
 {
 	if(ID>=MAX_CLIENTS)
@@ -106,6 +169,8 @@ void delClient(uint32_t ID)
 
 int main(int argc, char **argv)
 {
+#ifdef WIN32
+	// Set windows console stuff for escape charactors
 	HINSTANCE hInstance=GetModuleHandle(NULL);
 	HANDLE hOutput=GetStdHandle(STD_OUTPUT_HANDLE);
 	DWORD dwMode;
@@ -113,31 +178,36 @@ int main(int argc, char **argv)
 	GetConsoleMode(hOutput, &dwMode);
 	SetConsoleMode(hOutput, dwMode|ENABLE_PROCESSED_OUTPUT|ENABLE_VIRTUAL_TERMINAL_PROCESSING);
 
+	// Use process ID for random seed
 	seed=GetCurrentProcessId();
+#else
+	// Use process ID for random seed
+	seed=getpid();
+#endif
+
+	// Set seed
 	srand(seed);
 
+	// Clear client list
 	memset(&Clients, 0, sizeof(Client_t)*MAX_CLIENTS);
 
+	// Start up network
 	Network_Init();
 
-	// Create a new socket
+	// Create a new sockets
 	SendSocket=Network_CreateSocket();
 	RecvSocket=Network_CreateSocket();
 
-	if(SendSocket==-1)
-		return 1;
-
-	if(RecvSocket==-1)
+	if(SendSocket==-1||RecvSocket==-1)
 		return 1;
 
 	// Bind that socket to 0.0.0.0 (any adapter) on port 4545
-	if(!Network_SocketBind(RecvSocket, NETWORK_ADDRESS(0, 0, 0, 0), 4545))
+	if(!Network_SocketBind(RecvSocket, 0, 4545))
 		return 1;
 
 	DBGPRINTF(DEBUG_WARNING, "\033[25;0fCurrent seed: %d, waiting for connections...", seed);
 
-	// Loop around pulling data that was sent
-	bool Done=0;
+	// Loop around pulling data that was sent, until you press a key to close (need to do something else for that)
 	while(!_kbhit())
 	{
 		NetworkPacket_t Packet;
@@ -179,14 +249,36 @@ int main(int argc, char **argv)
 
 				if(Client->isConnected)
 				{
+					// Copy camera to client's camera struct
 					memcpy(&Client->Camera, &Packet.Camera, sizeof(Client->Camera));
-					Client->TTL=UINT16_MAX*4;
+					// Update time to live for sudden disconnect timeout (current time +5 seconds)
+					Client->TTL=GetClock()+5.0;
 				}
 			}
 		}
 
+		// 1KB buffer should be enough for now
+		// Magic = 4 bytes
+		// connectedClients = 4 bytes (could be 1 byte)
+		// 16x:
+		//		clientID = 4 bytes
+		//		Camera position = 12 bytes
+		//		Camera velocity = 12 bytes
+		//		Camera forward = 12 bytes
+		//		Camera up = 12 bytes
+		//
+		// Worst case is 840 bytes being sent to all clients, not terrible.
 		uint8_t Buffer[1024], *pBuffer=Buffer;
+
+		// Magic being sent back to clients is also "status"
 		uint32_t Magic=STATUS_PACKETMAGIC;
+
+		// Clear buffer
+		memset(Buffer, 0, sizeof(Buffer));
+
+		// Serialize data
+		memcpy(pBuffer, &Magic, sizeof(uint32_t));						pBuffer+=sizeof(uint32_t); // Packet magic
+		memcpy(pBuffer, &connectedClients, sizeof(uint32_t));			pBuffer+=sizeof(uint32_t); // Number of connected clients
 
 		for(uint32_t i=0;i<MAX_CLIENTS;i++)
 		{
@@ -194,41 +286,39 @@ int main(int argc, char **argv)
 
 			if(Client->isConnected)
 			{
-				memset(Buffer, 0, sizeof(Buffer));
-				pBuffer=Buffer;
-				memcpy(pBuffer, &Magic, sizeof(uint32_t));						pBuffer+=sizeof(uint32_t);
-				memcpy(pBuffer, &Client->clientID, sizeof(uint32_t));			pBuffer+=sizeof(uint32_t);
-				memcpy(pBuffer, &Client->Camera.Position, sizeof(float)*3);		pBuffer+=sizeof(float)*3;
-				memcpy(pBuffer, &Client->Camera.Velocity, sizeof(float)*3);		pBuffer+=sizeof(float)*3;
-				memcpy(pBuffer, &Client->Camera.Forward, sizeof(float)*3);		pBuffer+=sizeof(float)*3;
-				memcpy(pBuffer, &Client->Camera.Up, sizeof(float)*3);			pBuffer+=sizeof(float)*3;
+				memcpy(pBuffer, &Client->clientID, sizeof(uint32_t));			pBuffer+=sizeof(uint32_t); // Client ID
+				memcpy(pBuffer, &Client->Camera.Position, sizeof(float)*3);		pBuffer+=sizeof(float)*3; // Camera position
+				memcpy(pBuffer, &Client->Camera.Velocity, sizeof(float)*3);		pBuffer+=sizeof(float)*3; // Camera velocity
+				memcpy(pBuffer, &Client->Camera.Forward, sizeof(float)*3);		pBuffer+=sizeof(float)*3; // Camera forward (direction)
+				memcpy(pBuffer, &Client->Camera.Up, sizeof(float)*3);			pBuffer+=sizeof(float)*3; // Camera up
 
-				for(uint32_t j=0;j<MAX_CLIENTS;j++)
-				{
-					if(Clients[j].isConnected)
-						Network_SocketSend(SendSocket, Buffer, sizeof(Buffer), Clients[j].Address, Clients[j].Port);
-				}
-
-				DBGPRINTF(DEBUG_WARNING, "\033[%d;0H\033[KStatus from 0x%X:%d (ID %d) pos: %0.1f, %0.1f, %0.1f vel: %0.1f, %0.1f, %0.1f dir: %0.1f %0.1f %0.1f TTL: %d",
+				// Report status to console
+				DBGPRINTF(DEBUG_WARNING, "\033[%d;0H\033[KStatus from 0x%X:%d (ID %d) pos: %0.1f, %0.1f, %0.1f vel: %0.1f, %0.1f, %0.1f dir: %0.1f %0.1f %0.1f",
 						  Client->clientID+1,
 						  Client->Address, Client->Port, Client->clientID,
 						  Client->Camera.Position.x, Client->Camera.Position.y, Client->Camera.Position.z,
 						  Client->Camera.Velocity.x, Client->Camera.Velocity.y, Client->Camera.Velocity.z,
-						  Client->Camera.Forward.x, Client->Camera.Forward.y, Client->Camera.Forward.z,
-						  Client->TTL
+						  Client->Camera.Forward.x, Client->Camera.Forward.y, Client->Camera.Forward.z
 				);
 
-				Client->TTL--;
-
-				if(Client->TTL<0)
+				// If current time has gone past last hard time+5 seconds, then client has timed out... So remove it.
+				if(GetClock()>Client->TTL)
 				{
 					DBGPRINTF(DEBUG_WARNING, "\033[%d;0H\033[KDisconnected - Timed out.", Client->clientID+1);
 					delClient(Client->clientID);
 				}
 			}
 		}
+
+		// Blast collected connected client data back to all connected clients
+		for(uint32_t i=0;i<MAX_CLIENTS;i++)
+		{
+			if(Clients[i].isConnected)
+				Network_SocketSend(SendSocket, Buffer, sizeof(Buffer), Clients[i].Address, Clients[i].Port);
+		}
 	}
 
+	// Done, close sockets and shutdown
 	Network_SocketClose(SendSocket);
 	Network_SocketClose(RecvSocket);
 	Network_Destroy();
