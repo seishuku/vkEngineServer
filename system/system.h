@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include "../utils/memzone.h"
 
 #ifndef DEBUG_ERROR
 #define DEBUG_ERROR "\x1B[91m"
@@ -27,5 +28,7 @@
 #ifndef BUFFER_OFFSET
 #define BUFFER_OFFSET(x) ((char *)NULL+(x))
 #endif
+
+extern MemZone_t *Zone;
 
 #endif
