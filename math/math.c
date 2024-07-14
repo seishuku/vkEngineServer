@@ -46,17 +46,15 @@ float ftanf(const float x)
 	return fsinf(x)/fcosf(x);
 }
 
-// Bit-fiddle fast reciprical squareroot, ala Quake 3
+// Bit-fiddle fast reciprocal  square root, ala Quake 3
 float rsqrtf(float x)
 {
 	long i;
-	float x2, y;
-	const float threehalfs=1.5F;
+	float x2=x*0.5f, y=x;
+	const float threehalfs=1.5f;
 
-	x2=x*0.5F;
-	y=x;
 	i=*(long *)&y;				// evil floating point bit level hacking
-	i=0x5f3759df-(i>>1);		// WTF? 
+	i=0x5F3759DF-(i>>1);		// WTF? 
 	y=*(float *)&i;
 	y=y*(threehalfs-(x2*y*y));	// 1st iteration
 //	y=y*(threehalfs-(x2*y*y));	// 2nd iteration, this can be removed
@@ -76,22 +74,33 @@ float fact(const int32_t n)
 	return j;
 }
 
-static uint32_t _Seed=0;
+static uint32_t randomSeed=0;
 
-void RandomSeed(uint32_t Seed)
+void RandomSeed(uint32_t seed)
 {
-	_Seed=Seed;
+	randomSeed=seed;
 }
 
 uint32_t Random(void)
 {
-	_Seed=(_Seed^61u)^(_Seed>>16u);
-	_Seed*=9u;
-	_Seed=_Seed^(_Seed>>4u);
-	_Seed*=0x27d4eb2du;
-	_Seed=_Seed^(_Seed>>15u);
+#if 0
+	// Wang
+	randomSeed=((randomSeed^61u)^(randomSeed>>16u))*9u;
+	randomSeed=(randomSeed^(randomSeed>>4u))*0x27d4EB2Du;
+	randomSeed=randomSeed^(randomSeed>>15u);
+#else
+	// PCG
+	uint32_t State=randomSeed*0x2C9277B5u+0xAC564B05u;
+	uint32_t Word=((State>>((State>>28u)+4u))^State)*0x108EF2D9u;
+	randomSeed=(Word>>22u)^Word;
+#endif
 
-	return _Seed;
+	return randomSeed;
+}
+
+int32_t RandRange(int32_t min, int32_t max)
+{
+	return (Random()%(max-min+1))+min;
 }
 
 float RandFloat(void)
@@ -99,9 +108,9 @@ float RandFloat(void)
 	return (float)Random()/(float)UINT32_MAX;
 }
 
-int32_t RandRange(int32_t min, int32_t max)
+float RandFloatRange(float min, float max)
 {
-	return (Random()%(max-min+1))+min;
+	return ((max-min)*RandFloat())+min;
 }
 
 uint32_t IsPower2(uint32_t value)
@@ -147,4 +156,18 @@ int32_t ComputeLog(uint32_t value)
 float Lerp(const float a, const float b, const float t)
 {
 	return t*(b-a)+a;
+}
+
+float raySphereIntersect(vec3 rayOrigin, vec3 rayDirection, vec3 sphereCenter, float sphereRadius)
+{
+	vec3 oc=Vec3_Subv(rayOrigin, sphereCenter);
+	float a=Vec3_Dot(rayDirection, rayDirection);
+	float b=2.0f*Vec3_Dot(oc, rayDirection);
+	float c=Vec3_Dot(oc, oc)-sphereRadius*sphereRadius;
+	float discriminant=b*b-4*a*c;
+
+	if(discriminant<0.0f)
+		return -1.0f;
+	else
+		return (-b-sqrtf(discriminant))/(2.0f*a);
 }

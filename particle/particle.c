@@ -1,180 +1,179 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <threads.h>
 #include <string.h>
 #include "../system/system.h"
 //#include "../vulkan/vulkan.h"
 //#include "../image/image.h"
 #include "../math/math.h"
 #include "../utils/list.h"
-#include "../utils/genid.h"
 #include "../camera/camera.h"
 #include "particle.h"
 
 // External data from engine.c
-//extern VkuContext_t Context;
+//extern VkuContext_t vkContext;
 //extern VkSampleCountFlags MSAA;
 //extern VkFormat ColorFormat, DepthFormat;
+//
+//extern VkRenderPass renderPass;
 
-//extern VkuMemZone_t *VkZone;
+//extern Camera_t camera;
 ////////////////////////////
 
-//VkuDescriptorSet_t ParticleDescriptorSet;
-//VkPipelineLayout ParticlePipelineLayout;
-//VkuPipeline_t ParticlePipeline;
+//static VkuDescriptorSet_t particleDescriptorSet;
+//static VkPipelineLayout particlePipelineLayout;
+//static VkuPipeline_t particlePipeline;
 
-//VkuImage_t ParticleTexture;
+//static VkuImage_t particleTexture;
 
-struct
+//struct
+//{
+//	matrix mvp;
+//	vec4 Right;
+//	vec4 Up;
+//} particlePC;
+
+inline static void emitterDefaultInit(Particle_t *particle)
 {
-	matrix mvp;
-	vec4 Right;
-	vec4 Up;
-} ParticlePC;
+	float seedRadius=30.0f;
+	float theta=RandFloat()*2.0f*PI;
+	float r=RandFloat()*seedRadius;
 
-// Resizes the OpenGL vertex buffer and system memory vertex buffer
-bool ParticleSystem_ResizeBuffer(ParticleSystem_t *System)
-{
-	if(System==NULL)
-		return false;
+	// Set particle start position to emitter position
+	particle->position=Vec3b(0.0f);
+	particle->velocity=Vec3(r*sinf(theta), RandFloat()*100.0f, r*cosf(theta));
 
-	uint32_t Count=0;
-
-	for(uint32_t i=0;i<List_GetCount(&System->Emitters);i++)
-	{
-		ParticleEmitter_t *Emitter=List_GetPointer(&System->Emitters, i);
-		Count+=Emitter->NumParticles;
-	}
-
-	// Resize vertex buffer
-	//vkDeviceWaitIdle(Context.Device);
-
-	//if(System->ParticleBuffer.Buffer)
-	//{
-	//	vkUnmapMemory(Context.Device, System->ParticleBuffer.DeviceMemory);
-	//	vkDestroyBuffer(Context.Device, System->ParticleBuffer.Buffer, VK_NULL_HANDLE);
-	//	vkFreeMemory(Context.Device, System->ParticleBuffer.DeviceMemory, VK_NULL_HANDLE);
-	//}
-
-	//vkuCreateHostBuffer(&Context, &System->ParticleBuffer, sizeof(vec4)*2*Count, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-	//vkMapMemory(Context.Device, System->ParticleBuffer.DeviceMemory, 0, VK_WHOLE_SIZE, 0, (void **)&System->ParticleArray);
-
-	return true;
+	particle->life=RandFloat()*0.999f+0.001f;
 }
 
 // Adds a particle emitter to the system
-uint32_t ParticleSystem_AddEmitter(ParticleSystem_t *System, vec3 Position, vec3 StartColor, vec3 EndColor, float ParticleSize, uint32_t NumParticles, bool Burst, ParticleInitCallback InitCallback)
+uint32_t ParticleSystem_AddEmitter(ParticleSystem_t *system, vec3 position, vec3 startColor, vec3 endColor, float particleSize, uint32_t numParticles, ParticleEmitterType_e type, ParticleInitCallback initCallback)
 {
-	if(System==NULL)
-		return false;
+	if(system==NULL)
+		return UINT32_MAX;
+
+	mtx_lock(&system->mutex);
 
 	// Pull the next ID from the global ID count
-	uint32_t ID=GenID();
+	uint32_t ID=system->baseID++;
 
 	// Increment emitter count and resize emitter memory
 
-	ParticleEmitter_t Emitter;
+	ParticleEmitter_t emitter;
 
-	if(InitCallback==NULL)
-		Emitter.InitCallback=NULL;
+	if(initCallback==NULL)
+		emitter.initCallback=NULL;
 	else
-		Emitter.InitCallback=InitCallback;
+		emitter.initCallback=initCallback;
 
 	// Set various flags/parameters
-	Emitter.Burst=Burst;
-	Emitter.ID=ID;
-	Emitter.StartColor=StartColor;
-	Emitter.EndColor=EndColor;
-	Emitter.ParticleSize=ParticleSize;
+	emitter.type=type;
+	emitter.ID=ID;
+	emitter.startColor=startColor;
+	emitter.endColor=endColor;
+	emitter.particleSize=particleSize;
 
 	// Set number of particles and allocate memory
-	Emitter.NumParticles=NumParticles;
-	Emitter.Particles=Zone_Malloc(Zone, NumParticles*sizeof(Particle_t));
+	emitter.numParticles=numParticles;
+	emitter.particles=(Particle_t *)Zone_Malloc(zone, numParticles*sizeof(Particle_t));
 
-	if(Emitter.Particles==NULL)
-		return UINT32_MAX;
-
-	memset(Emitter.Particles, 0, NumParticles*sizeof(Particle_t));
-
-	// Set emitter position (used when resetting/recycling particles when they die)
-	Emitter.Position=Position;
-
-	// Set initial particle position and life to -1.0 (dead)
-	for(uint32_t i=0;i<Emitter.NumParticles;i++)
+	if(emitter.particles==NULL)
 	{
-		Emitter.Particles[i].ID=ID;
-		Emitter.Particles[i].pos=Position;
-		Emitter.Particles[i].life=-1.0f;
+		mtx_unlock(&system->mutex);
+		return UINT32_MAX;
 	}
 
-	List_Add(&System->Emitters, &Emitter);
+	memset(emitter.particles, 0, numParticles*sizeof(Particle_t));
+
+	// Set emitter position (used when resetting/recycling particles when they die)
+	emitter.position=position;
+
+	// Set initial particle position and life to -1.0 (dead), unless it's a one-shot, then set it up with default or callback
+	for(uint32_t i=0;i<emitter.numParticles;i++)
+	{
+		emitter.particles[i].ID=ID;
+		emitter.particles[i].position=position;
+
+		if(emitter.type==PARTICLE_EMITTER_ONCE)
+		{
+			if(emitter.initCallback)
+				emitter.initCallback(i, emitter.numParticles, &emitter.particles[i]);
+			else
+				emitterDefaultInit(&emitter.particles[i]);
+
+			// Add particle emitter position to the calculated position
+			emitter.particles[i].position=Vec3_Addv(emitter.particles[i].position, emitter.position);
+		}
+		else
+			emitter.particles[i].life=-1.0f;
+	}
+
+	List_Add(&system->emitters, &emitter);
 
 	// Resize vertex buffers (both system memory and OpenGL buffer)
-	if(!ParticleSystem_ResizeBuffer(System))
-		return UINT32_MAX;
+	// if(!ParticleSystem_ResizeBuffer(system))
+	// {
+	// 	atomic_store(&system->mutex, false);
+	// 	return UINT32_MAX;
+	// }
+
+	mtx_unlock(&system->mutex);
 
 	return ID;
 }
 
 // Removes a particle emitter from the system
-void ParticleSystem_DeleteEmitter(ParticleSystem_t *System, uint32_t ID)
+void ParticleSystem_DeleteEmitter(ParticleSystem_t *system, uint32_t ID)
 {
-	if(System==NULL||ID==UINT32_MAX)
+	if(system==NULL||ID==UINT32_MAX)
 		return;
 
-	for(uint32_t i=0;i<List_GetCount(&System->Emitters);i++)
-	{
-		ParticleEmitter_t *Emitter=List_GetPointer(&System->Emitters, i);
+	mtx_lock(&system->mutex);
 
-		if(Emitter->ID==ID)
+	for(uint32_t i=0;i<List_GetCount(&system->emitters);i++)
+	{
+		ParticleEmitter_t *emitter=(ParticleEmitter_t *)List_GetPointer(&system->emitters, i);
+
+		if(emitter->ID==ID)
 		{
-			Zone_Free(Zone, Emitter->Particles);
-			List_Del(&System->Emitters, i);
+			Zone_Free(zone, emitter->particles);
+			List_Del(&system->emitters, i);
 
 			// Resize vertex buffers (both system memory and OpenGL buffer)
-			ParticleSystem_ResizeBuffer(System);
-			return;
+			// ParticleSystem_ResizeBuffer(system);
+			break;
 		}
 	}
+
+	mtx_unlock(&system->mutex);
 }
 
 // Resets the emitter to the initial parameters (mostly for a "burst" trigger)
-void ParticleSystem_ResetEmitter(ParticleSystem_t *System, uint32_t ID)
+void ParticleSystem_ResetEmitter(ParticleSystem_t *system, uint32_t ID)
 {
-	if(System==NULL||ID==UINT32_MAX)
+	if(system==NULL||ID==UINT32_MAX)
 		return;
 
-	for(uint32_t i=0;i<List_GetCount(&System->Emitters);i++)
+	for(uint32_t i=0;i<List_GetCount(&system->emitters);i++)
 	{
-		ParticleEmitter_t *Emitter=List_GetPointer(&System->Emitters, i);
+		ParticleEmitter_t *emitter=(ParticleEmitter_t *)List_GetPointer(&system->emitters, i);
 
-		if(Emitter->ID==ID)
+		if(emitter->ID==ID)
 		{
-			for(uint32_t j=0;j<Emitter->NumParticles;j++)
+			for(uint32_t j=0;j<emitter->numParticles;j++)
 			{
 				// Only reset dead particles, limit "total reset" weirdness
-				if(Emitter->Particles[j].life<0.0f)
+				if(emitter->particles[j].life<0.0f)
 				{
 					// If a velocity/life callback was set, use it... Otherwise use default "fountain" style
-					if(Emitter->InitCallback)
-					{
-						Emitter->InitCallback(j, Emitter->NumParticles, &Emitter->Particles[j]);
-
-						// Add particle emitter position to the calculated position
-						Emitter->Particles[j].pos=Vec3_Addv(Emitter->Particles[j].pos, Emitter->Position);
-					}
+					if(emitter->initCallback)
+						emitter->initCallback(j, emitter->numParticles, &emitter->particles[j]);
 					else
-					{
-						float SeedRadius=30.0f;
-						float theta=RandFloat()*2.0f*PI;
-						float r=RandFloat()*SeedRadius;
+						emitterDefaultInit(&emitter->particles[j]);
 
-						// Set particle start position to emitter position
-						Emitter->Particles[j].pos=Emitter->Position;
-						Emitter->Particles[j].vel=Vec3(r*sinf(theta), RandFloat()*100.0f, r*cosf(theta));
-
-						Emitter->Particles[j].life=RandFloat()*0.999f+0.001f;
-					}
+					// Add particle emitter position to the calculated position
+					emitter->particles[j].position=Vec3_Addv(emitter->particles[j].position, emitter->position);
 				}
 			}
 
@@ -183,109 +182,120 @@ void ParticleSystem_ResetEmitter(ParticleSystem_t *System, uint32_t ID)
 	}
 }
 
-void ParticleSystem_SetEmitterPosition(ParticleSystem_t *System, uint32_t ID, vec3 Position)
+void ParticleSystem_SetEmitterPosition(ParticleSystem_t *system, uint32_t ID, vec3 position)
 {
-	if(System==NULL||ID==UINT32_MAX)
+	if(system==NULL||ID==UINT32_MAX)
 		return;
 
-	for(uint32_t i=0;i<List_GetCount(&System->Emitters);i++)
+	for(uint32_t i=0;i<List_GetCount(&system->emitters);i++)
 	{
-		ParticleEmitter_t *Emitter=List_GetPointer(&System->Emitters, i);
+		ParticleEmitter_t *emitter=(ParticleEmitter_t*)List_GetPointer(&system->emitters, i);
 
-		if(Emitter->ID==ID)
+		if(emitter->ID==ID)
 		{
-			Emitter->Position=Position;
+			emitter->position=position;
 			return;
 		}
 	}
 }
 
-bool ParticleSystem_SetGravity(ParticleSystem_t *System, float x, float y, float z)
+bool ParticleSystem_SetGravity(ParticleSystem_t *system, float x, float y, float z)
 {
-	if(System==NULL)
+	if(system==NULL)
 		return false;
 
-	System->Gravity=Vec3(x, y, z);
+	system->gravity=Vec3(x, y, z);
 
 	return true;
 }
 
-bool ParticleSystem_SetGravityv(ParticleSystem_t *System, vec3 v)
+bool ParticleSystem_SetGravityv(ParticleSystem_t *system, vec3 v)
 {
-	if(System==NULL)
+	if(system==NULL)
 		return false;
 
-	System->Gravity=v;
+	system->gravity=v;
 
 	return true;
 }
 
-bool ParticleSystem_Init(ParticleSystem_t *System)
+bool ParticleSystem_Init(ParticleSystem_t *system)
 {
-	if(System==NULL)
+	if(system==NULL)
 		return false;
 
-	List_Init(&System->Emitters, sizeof(ParticleEmitter_t), 10, NULL);
+	if(mtx_init(&system->mutex, mtx_plain))
+	{
+		DBGPRINTF(DEBUG_ERROR, "ParticleSystem_Init: Unable to create mutex.\r\n");
+		return false;
+	}
 
-	System->ParticleArray=NULL;
+	system->baseID=0;
+
+	List_Init(&system->emitters, sizeof(ParticleEmitter_t), 10, NULL);
+
+	system->count=0;
 
 	// Default generic gravity
-	System->Gravity=Vec3(0.0f, -9.81f, 0.0f);
+	system->gravity=Vec3(0.0f, -9.81f, 0.0f);
 
-	//if(!Image_Upload(&Context, &ParticleTexture, "./assets/particle.tga", IMAGE_BILINEAR|IMAGE_MIPMAP))
+	//if(!Image_Upload(&Context, &ParticleTexture, "assets/particle.tga", IMAGE_BILINEAR|IMAGE_MIPMAP))
 	//	return false;
 
 	//vkuInitDescriptorSet(&ParticleDescriptorSet, &Context);
 	//vkuDescriptorSet_AddBinding(&ParticleDescriptorSet, 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
 	//vkuAssembleDescriptorSetLayout(&ParticleDescriptorSet);
 
-	//vkCreatePipelineLayout(Context.Device, &(VkPipelineLayoutCreateInfo)
+	//vkCreatePipelineLayout(vkContext.device, &(VkPipelineLayoutCreateInfo)
 	//{
 	//	.sType=VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-	//	.setLayoutCount=1,
-	//	.pSetLayouts=&ParticleDescriptorSet.DescriptorSetLayout,
+	//	//.setLayoutCount=1,
+	//	//.pSetLayouts=&ParticleDescriptorSet.descriptorSetLayout,
 	//	.pushConstantRangeCount=1,
 	//	.pPushConstantRanges=&(VkPushConstantRange)
 	//	{
 	//		.stageFlags=VK_SHADER_STAGE_GEOMETRY_BIT,
 	//		.offset=0,
-	//		.size=sizeof(ParticlePC)
+	//		.size=sizeof(particlePC)
 	//	},
-	//}, 0, &ParticlePipelineLayout);
+	//}, 0, &particlePipelineLayout);
 
-	//vkuInitPipeline(&ParticlePipeline, &Context);
+	//vkuInitPipeline(&particlePipeline, vkContext.device, vkContext.pipelineCache);
 
-	//vkuPipeline_SetPipelineLayout(&ParticlePipeline, ParticlePipelineLayout);
+	//vkuPipeline_SetPipelineLayout(&particlePipeline, particlePipelineLayout);
+	//vkuPipeline_SetRenderPass(&particlePipeline, renderPass);
 
-	//ParticlePipeline.Topology=VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
-	//ParticlePipeline.CullMode=VK_CULL_MODE_BACK_BIT;
-	//ParticlePipeline.DepthTest=VK_TRUE;
-	//ParticlePipeline.DepthCompareOp=VK_COMPARE_OP_GREATER_OR_EQUAL;
-	//ParticlePipeline.DepthWrite=VK_FALSE;
-	//ParticlePipeline.RasterizationSamples=MSAA;
+	//particlePipeline.subpass=0;
 
-	//ParticlePipeline.Blend=VK_TRUE;
-	//ParticlePipeline.SrcColorBlendFactor=VK_BLEND_FACTOR_SRC_ALPHA;
-	//ParticlePipeline.DstColorBlendFactor=VK_BLEND_FACTOR_ONE;
-	//ParticlePipeline.ColorBlendOp=VK_BLEND_OP_ADD;
-	//ParticlePipeline.SrcAlphaBlendFactor=VK_BLEND_FACTOR_SRC_ALPHA;
-	//ParticlePipeline.DstAlphaBlendFactor=VK_BLEND_FACTOR_ONE;
-	//ParticlePipeline.AlphaBlendOp=VK_BLEND_OP_ADD;
+	//particlePipeline.topology=VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+	//particlePipeline.cullMode=VK_CULL_MODE_BACK_BIT;
+	//particlePipeline.depthTest=VK_TRUE;
+	//particlePipeline.depthCompareOp=VK_COMPARE_OP_GREATER_OR_EQUAL;
+	//particlePipeline.depthWrite=VK_TRUE;
+	//particlePipeline.rasterizationSamples=MSAA;
 
-	//if(!vkuPipeline_AddStage(&ParticlePipeline, "./shaders/particle.vert.spv", VK_SHADER_STAGE_VERTEX_BIT))
+	//particlePipeline.blend=VK_TRUE;
+	//particlePipeline.srcColorBlendFactor=VK_BLEND_FACTOR_SRC_ALPHA;
+	//particlePipeline.dstColorBlendFactor=VK_BLEND_FACTOR_ONE;
+	//particlePipeline.colorBlendOp=VK_BLEND_OP_ADD;
+	//particlePipeline.srcAlphaBlendFactor=VK_BLEND_FACTOR_SRC_ALPHA;
+	//particlePipeline.dstAlphaBlendFactor=VK_BLEND_FACTOR_ONE;
+	//particlePipeline.alphaBlendOp=VK_BLEND_OP_ADD;
+
+	//if(!vkuPipeline_AddStage(&particlePipeline, "shaders/particle.vert.spv", VK_SHADER_STAGE_VERTEX_BIT))
 	//	return false;
 
-	//if(!vkuPipeline_AddStage(&ParticlePipeline, "./shaders/particle.geom.spv", VK_SHADER_STAGE_GEOMETRY_BIT))
+	//if(!vkuPipeline_AddStage(&particlePipeline, "shaders/particle.geom.spv", VK_SHADER_STAGE_GEOMETRY_BIT))
 	//	return false;
 
-	//if(!vkuPipeline_AddStage(&ParticlePipeline, "./shaders/particle.frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT))
+	//if(!vkuPipeline_AddStage(&particlePipeline, "shaders/particle.frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT))
 	//	return false;
 
-	//vkuPipeline_AddVertexBinding(&ParticlePipeline, 0, sizeof(vec4)*2, VK_VERTEX_INPUT_RATE_VERTEX);
-	//vkuPipeline_AddVertexAttribute(&ParticlePipeline, 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0);
-	//vkuPipeline_AddVertexAttribute(&ParticlePipeline, 1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, sizeof(vec4));
+	//vkuPipeline_AddVertexBinding(&particlePipeline, 0, sizeof(vec4)*2, VK_VERTEX_INPUT_RATE_VERTEX);
+	//vkuPipeline_AddVertexAttribute(&particlePipeline, 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0);
+	//vkuPipeline_AddVertexAttribute(&particlePipeline, 1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, sizeof(vec4));
 
-	//VkPipelineRenderingCreateInfo PipelineRenderingCreateInfo=
+	//VkPipelineRenderingCreateInfo pipelineRenderingCreateInfo=
 	//{
 	//	.sType=VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
 	//	.colorAttachmentCount=1,
@@ -293,133 +303,178 @@ bool ParticleSystem_Init(ParticleSystem_t *System)
 	//	.depthAttachmentFormat=DepthFormat,
 	//};
 
-	//if(!vkuAssemblePipeline(&ParticlePipeline, &PipelineRenderingCreateInfo))
+	//if(!vkuAssemblePipeline(&particlePipeline, VK_NULL_HANDLE/*&pipelineRenderingCreateInfo*/))
 	//	return false;
 
 	return true;
 }
 
-void ParticleSystem_Step(ParticleSystem_t *System, float dt)
+void ParticleSystem_Step(ParticleSystem_t *system, float dt)
 {
-	if(System==NULL)
+	if(system==NULL)
 		return;
 
-	for(uint32_t i=0;i<List_GetCount(&System->Emitters);i++)
+	for(uint32_t i=0;i<List_GetCount(&system->emitters);i++)
 	{
-		ParticleEmitter_t *Emitter=List_GetPointer(&System->Emitters, i);
+		ParticleEmitter_t *emitter=(ParticleEmitter_t *)List_GetPointer(&system->emitters, i);
+		bool isActive=false;
 
-		for(uint32_t j=0;j<Emitter->NumParticles;j++)
+		for(uint32_t j=0;j<emitter->numParticles;j++)
 		{
-			Emitter->Particles[j].life-=dt*0.75f;
-
-			// If the particle is dead and isn't a one shot (burst), restart it...
-			// Otherwise run the math for the particle system motion.
-			if(Emitter->Particles[j].life<0.0f&&!Emitter->Burst)
+			if(emitter->particles[j].life>0.0f)
+			{
+				isActive=true;
+				emitter->particles[j].velocity=Vec3_Addv(emitter->particles[j].velocity, Vec3_Muls(system->gravity, dt));
+				emitter->particles[j].position=Vec3_Addv(emitter->particles[j].position, Vec3_Muls(emitter->particles[j].velocity, dt));
+			}
+			else if(emitter->type==PARTICLE_EMITTER_CONTINOUS)
 			{
 				// If a velocity/life callback was set, use it... Otherwise use default "fountain" style
-				if(Emitter->InitCallback)
-				{
-					Emitter->InitCallback(j, Emitter->NumParticles, &Emitter->Particles[j]);
-
-					// Add particle emitter position to the calculated position
-					Emitter->Particles[j].pos=Vec3_Addv(Emitter->Particles[j].pos, Emitter->Position);
-				}
+				if(emitter->initCallback)
+					emitter->initCallback(j, emitter->numParticles, &emitter->particles[j]);
 				else
-				{
-					float SeedRadius=30.0f;
-					float theta=RandFloat()*2.0f*PI;
-					float r=RandFloat()*SeedRadius;
+					emitterDefaultInit(&emitter->particles[j]);
 
-					// Set particle start position to emitter position
-					Emitter->Particles[j].pos=Emitter->Position;
-					Emitter->Particles[j].vel=Vec3(r*sinf(theta), RandFloat()*100.0f, r*cosf(theta));
+				// Add particle emitter position to the calculated position
+				emitter->particles[j].position=Vec3_Addv(emitter->particles[j].position, emitter->position);
+			}
 
-					Emitter->Particles[j].life=RandFloat()*0.999f+0.001f;
-				}
-			}
-			else
-			{
-				if(Emitter->Particles[j].life>0.0f)
-				{
-					Emitter->Particles[j].vel=Vec3_Addv(Emitter->Particles[j].vel, Vec3_Muls(System->Gravity, dt));
-					Emitter->Particles[j].pos=Vec3_Addv(Emitter->Particles[j].pos, Vec3_Muls(Emitter->Particles[j].vel, dt));
-				}
-			}
+			emitter->particles[j].life-=dt*0.75f;
+		}
+
+		if(!isActive&&emitter->type==PARTICLE_EMITTER_ONCE)
+		{
+			DBGPRINTF(DEBUG_WARNING, "REMOVING UNUSED EMITTER #%d\n", emitter->ID);
+			ParticleSystem_DeleteEmitter(system, emitter->ID);
 		}
 	}
 }
 
-//void ParticleSystem_Draw(ParticleSystem_t *System, VkCommandBuffer CommandBuffer, VkDescriptorPool DescriptorPool, matrix Modelview, matrix Projection)
+//int compareParticles(const void *a, const void *b)
 //{
-//	if(System==NULL)
+//	vec3 *particleA=(vec3 *)a;
+//	vec3 *particleB=(vec3 *)b;
+//
+//	float distA=Vec3_DistanceSq(*particleA, camera.body.position);
+//	float distB=Vec3_DistanceSq(*particleB, camera.body.position);
+//
+//	if(distA>distB)
+//		return -1;
+//
+//	if(distA<distB)
+//		return 1;
+//
+//	return 0;
+//}
+
+//void ParticleSystem_Draw(ParticleSystem_t *system, VkCommandBuffer commandBuffer, VkDescriptorPool descriptorPool, matrix modelview, matrix projection)
+//{
+//	if(system==NULL)
 //		return;
 //
-//	float *Array=System->ParticleArray;
+//	mtx_lock(&system->mutex);
 //
-//	if(Array==NULL)
-//		return;
+//	uint32_t count=0;
 //
-//	uint32_t Count=0;
-//
-//	for(uint32_t i=0;i<List_GetCount(&System->Emitters);i++)
+//	for(uint32_t i=0;i<List_GetCount(&system->emitters);i++)
 //	{
-//		ParticleEmitter_t *Emitter=List_GetPointer(&System->Emitters, i);
+//		ParticleEmitter_t *emitter=(ParticleEmitter_t *)List_GetPointer(&system->emitters, i);
+//		count+=emitter->numParticles;
+//	}
 //
-//		for(uint32_t j=0;j<Emitter->NumParticles;j++)
+//	// If the count isn't what the last count was, resize the buffer.
+//	if(count!=system->count)
+//	{
+//		system->count=count;
+//
+//		// Resize vertex buffer, this is not ideal.
+//		vkDeviceWaitIdle(vkContext.device);
+//
+//		if(system->particleBuffer.buffer)
+//		{
+//			vkuDestroyBuffer(&vkContext, &system->particleBuffer);
+//			Zone_Free(zone, system->systemBuffer);
+//		}
+//
+//		vkuCreateHostBuffer(&vkContext, &system->particleBuffer, sizeof(vec4)*2*count, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+//		system->systemBuffer=(float *)Zone_Malloc(zone, sizeof(vec4)*2*count);
+//	}
+//
+//	count=0;
+//	float *array=system->systemBuffer;//(float *)system->particleBuffer.memory->mappedPointer;
+//
+//	if(array==NULL)
+//	{
+//		mtx_unlock(&system->mutex);
+//		return;
+//	}
+//
+//	for(uint32_t i=0;i<List_GetCount(&system->emitters);i++)
+//	{
+//		ParticleEmitter_t *emitter=(ParticleEmitter_t *)List_GetPointer(&system->emitters, i);
+//
+//		for(uint32_t j=0;j<emitter->numParticles;j++)
 //		{
 //			// Only draw ones that are alive still
-//			if(Emitter->Particles[j].life>0.0f)
+//			if(emitter->particles[j].life>0.0f)
 //			{
-//				*Array++=Emitter->Particles[j].pos.x;
-//				*Array++=Emitter->Particles[j].pos.y;
-//				*Array++=Emitter->Particles[j].pos.z;
-//				*Array++=Emitter->ParticleSize;
-//				vec3 Color=Vec3_Lerp(Emitter->StartColor, Emitter->EndColor, Emitter->Particles[j].life);
-//				*Array++=Color.x;
-//				*Array++=Color.y;
-//				*Array++=Color.z;
-//				*Array++=Emitter->Particles[j].life;
+//				*array++=emitter->particles[j].position.x;
+//				*array++=emitter->particles[j].position.y;
+//				*array++=emitter->particles[j].position.z;
+//				*array++=emitter->particleSize;
+//				vec3 color=Vec3_Lerp(emitter->startColor, emitter->endColor, emitter->particles[j].life);
+//				*array++=color.x;
+//				*array++=color.y;
+//				*array++=color.z;
+//				*array++=clampf(emitter->particles[j].life, 0.0f, 1.0f);
 //
-//				Count++;
+//				count++;
 //			}
 //		}
 //	}
 //
-//	ParticlePC.mvp=MatrixMult(Modelview, Projection);
-//	ParticlePC.Right=Vec4(Modelview.x.x, Modelview.y.x, Modelview.z.x, Modelview.w.x);
-//	ParticlePC.Up=Vec4(Modelview.x.y, Modelview.y.y, Modelview.z.y, Modelview.w.y);
+//	qsort(system->systemBuffer, count, sizeof(vec4)*2, compareParticles);
 //
-//	vkuDescriptorSet_UpdateBindingImageInfo(&ParticleDescriptorSet, 0, &ParticleTexture);
-//	vkuAllocateUpdateDescriptorSet(&ParticleDescriptorSet, DescriptorPool);
+//	memcpy(system->particleBuffer.memory->mappedPointer, system->systemBuffer, sizeof(vec4)*2*count);
 //
-//	vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, ParticlePipelineLayout, 0, 1, &ParticleDescriptorSet.DescriptorSet, 0, VK_NULL_HANDLE);
+//	mtx_unlock(&system->mutex);
 //
-//	vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, ParticlePipeline.Pipeline);
-//	vkCmdPushConstants(CommandBuffer, ParticlePipelineLayout, VK_SHADER_STAGE_GEOMETRY_BIT, 0, sizeof(ParticlePC), &ParticlePC);
+//	particlePC.mvp=MatrixMult(modelview, projection);
+//	particlePC.Right=Vec4(modelview.x.x, modelview.y.x, modelview.z.x, modelview.w.x);
+//	particlePC.Up=Vec4(modelview.x.y, modelview.y.y, modelview.z.y, modelview.w.y);
 //
-//	vkCmdBindVertexBuffers(CommandBuffer, 0, 1, &System->ParticleBuffer.Buffer, &(VkDeviceSize) { 0 });
-//	vkCmdDraw(CommandBuffer, Count, 1, 0, 0);
+//	//vkuDescriptorSet_UpdateBindingImageInfo(&particleDescriptorSet, 0, &particleTexture);
+//	//vkuAllocateUpdateDescriptorSet(&particleDescriptorSet, descriptorPool);
+//
+//	//vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, particlePipelineLayout, 0, 1, &particleDescriptorSet.descriptorSet, 0, VK_NULL_HANDLE);
+//
+//	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, particlePipeline.pipeline);
+//	vkCmdPushConstants(commandBuffer, particlePipelineLayout, VK_SHADER_STAGE_GEOMETRY_BIT, 0, sizeof(particlePC), &particlePC);
+//
+//	vkCmdBindVertexBuffers(commandBuffer, 0, 1, &system->particleBuffer.buffer, &(VkDeviceSize) { 0 });
+//	vkCmdDraw(commandBuffer, count, 1, 0, 0);
 //}
 
-void ParticleSystem_Destroy(ParticleSystem_t *System)
+void ParticleSystem_Destroy(ParticleSystem_t *system)
 {
-	if(System==NULL)
+	if(system==NULL)
 		return;
 
-	//vkuDestroyBuffer(&Context, &System->ParticleBuffer);
+	//vkuDestroyBuffer(&vkContext, &system->particleBuffer);
+	//Zone_Free(zone, system->systemBuffer);
 
-	//vkuDestroyImageBuffer(&Context, &ParticleTexture);
+	//vkuDestroyImageBuffer(&Context, &particleTexture);
 
-	//vkDestroyPipeline(Context.Device, ParticlePipeline.Pipeline, VK_NULL_HANDLE);
-	//vkDestroyPipelineLayout(Context.Device, ParticlePipelineLayout, VK_NULL_HANDLE);
-	//vkDestroyDescriptorSetLayout(Context.Device, ParticleDescriptorSet.DescriptorSetLayout, VK_NULL_HANDLE);
+	//vkDestroyPipeline(vkContext.device, particlePipeline.pipeline, VK_NULL_HANDLE);
+	//vkDestroyPipelineLayout(vkContext.device, particlePipelineLayout, VK_NULL_HANDLE);
+	//vkDestroyDescriptorSetLayout(Context.device, particleDescriptorSet.descriptorSetLayout, VK_NULL_HANDLE);
 
-	for(uint32_t i=0;i<List_GetCount(&System->Emitters);i++)
+	for(uint32_t i=0;i<List_GetCount(&system->emitters);i++)
 	{
-		ParticleEmitter_t *Emitter=List_GetPointer(&System->Emitters, i);
+		ParticleEmitter_t *emitter=(ParticleEmitter_t *)List_GetPointer(&system->emitters, i);
 
-		Zone_Free(Zone, Emitter->Particles);
+		Zone_Free(zone, emitter->particles);
 	}
 
-	List_Destroy(&System->Emitters);
+	List_Destroy(&system->emitters);
 }

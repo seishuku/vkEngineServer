@@ -2,53 +2,68 @@
 #define __PARTICLE_H__
 
 #include <stdint.h>
+#include <stdbool.h>
+#include <stdatomic.h>
+#include <threads.h>
 #include "../utils/list.h"
 #include "../math/math.h"
 //#include "../vulkan/vulkan.h"
 
-typedef struct
+typedef struct Particle_s
 {
 	uint32_t ID;
 	float life;
-	vec3 pos, vel;
+	vec3 position, velocity;
 } Particle_t;
 
-typedef void (*ParticleInitCallback)(uint32_t Index, uint32_t NumParticles, Particle_t *Particle);
+typedef void (*ParticleInitCallback)(uint32_t index, uint32_t numParticles, Particle_t *particle);
 
-typedef struct
+typedef enum ParticleEmitterType_e
+{
+	PARTICLE_EMITTER_CONTINOUS=0,
+	PARTICLE_EMITTER_BURST=1,
+	PARTICLE_EMITTER_ONCE=2,
+} ParticleEmitterType_e;
+
+typedef struct ParticleEmitter_s
 {
 	uint32_t ID;
-	bool Burst;
-	vec3 Position;
-	vec3 StartColor, EndColor;
-	float ParticleSize;
-	uint32_t NumParticles;
-	Particle_t *Particles;
+	ParticleEmitterType_e type;
+	vec3 position;
+	vec3 startColor, endColor;
+	float particleSize;
+	uint32_t numParticles;
+	Particle_t *particles;
 
-	ParticleInitCallback InitCallback;
+	ParticleInitCallback initCallback;
 } ParticleEmitter_t;
 
-typedef struct
+typedef struct ParticleSystem_s
 {
-	vec3 Gravity;
+	uint32_t baseID;
 
-	List_t Emitters;
+	vec3 gravity;
 
-	//VkuBuffer_t ParticleBuffer;
-	float *ParticleArray;
+	List_t emitters;
+
+	mtx_t mutex;
+
+	uint32_t count;
+	//VkuBuffer_t particleBuffer;
+	//float *systemBuffer;
 } ParticleSystem_t;
 
-uint32_t ParticleSystem_AddEmitter(ParticleSystem_t *System, vec3 Position, vec3 StartColor, vec3 EndColor, float ParticleSize, uint32_t NumParticles, bool Burst, ParticleInitCallback InitCallback);
-void ParticleSystem_DeleteEmitter(ParticleSystem_t *System, uint32_t ID);
-void ParticleSystem_ResetEmitter(ParticleSystem_t *System, uint32_t ID);
-void ParticleSystem_SetEmitterPosition(ParticleSystem_t *System, uint32_t ID, vec3 Position);
+uint32_t ParticleSystem_AddEmitter(ParticleSystem_t *system, vec3 position, vec3 startColor, vec3 endColor, float particleSize, uint32_t numParticles, ParticleEmitterType_e type, ParticleInitCallback initCallback);
+void ParticleSystem_DeleteEmitter(ParticleSystem_t *system, uint32_t ID);
+void ParticleSystem_ResetEmitter(ParticleSystem_t *system, uint32_t ID);
+void ParticleSystem_SetEmitterPosition(ParticleSystem_t *system, uint32_t ID, vec3 position);
 
-bool ParticleSystem_SetGravity(ParticleSystem_t *System, float x, float y, float z);
-bool ParticleSystem_SetGravityv(ParticleSystem_t *System, vec3 v);
+bool ParticleSystem_SetGravity(ParticleSystem_t *system, float x, float y, float z);
+bool ParticleSystem_SetGravityv(ParticleSystem_t *system, vec3 v);
 
-bool ParticleSystem_Init(ParticleSystem_t *System);
-void ParticleSystem_Step(ParticleSystem_t *System, float dt);
-//void ParticleSystem_Draw(ParticleSystem_t *System, VkCommandBuffer CommandBuffer, VkDescriptorPool DescriptorPool, matrix Modelview, matrix Projection);
-void ParticleSystem_Destroy(ParticleSystem_t *System);
+bool ParticleSystem_Init(ParticleSystem_t *system);
+void ParticleSystem_Step(ParticleSystem_t *system, float dt);
+//void ParticleSystem_Draw(ParticleSystem_t *system, VkCommandBuffer commandBuffer, VkDescriptorPool descriptorPool, matrix modelview, matrix projection);
+void ParticleSystem_Destroy(ParticleSystem_t *system);
 
 #endif

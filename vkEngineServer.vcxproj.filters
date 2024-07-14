@@ -52,6 +52,9 @@
     <Filter Include="Header Files\camera">
       <UniqueIdentifier>{58a617bc-80a9-4747-b3cf-29cc1043598e}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Source Files\system">
+      <UniqueIdentifier>{50d0cefd-b899-43b2-b36a-7f037397e5ca}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="vkEngineServer.c">
@@ -93,8 +96,11 @@
     <ClCompile Include="camera\camera.c">
       <Filter>Source Files\camera</Filter>
     </ClCompile>
-    <ClCompile Include="utils\memzone.c">
-      <Filter>Source Files\utils</Filter>
+    <ClCompile Include="system\memzone.c">
+      <Filter>Source Files\system</Filter>
+    </ClCompile>
+    <ClCompile Include="system\threads.c">
+      <Filter>Source Files\system</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -127,6 +133,12 @@
     </ClInclude>
     <ClInclude Include="netpacket.h">
       <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="system\memzone.h">
+      <Filter>Header Files\system</Filter>
+    </ClInclude>
+    <ClInclude Include="system\threads.h">
+      <Filter>Header Files\system</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>

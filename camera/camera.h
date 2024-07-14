@@ -4,21 +4,15 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "../math/math.h"
+#include "../physics/physics.h"
 
-typedef struct
+typedef struct Camera_s
 {
-	vec3 Position;
-	vec3 Velocity;
+	RigidBody_t body;
 
-	vec3 Right;
-	vec3 Up;
-	vec3 Forward;
-
-	float Pitch;
-	float Yaw;
-	float Roll;
-
-	float Radius;
+	vec3 right;
+	vec3 up;
+	vec3 forward;
 
 	bool key_w, key_s;
 	bool key_a, key_d;
@@ -31,19 +25,21 @@ typedef struct
 
 typedef struct
 {
-	float Time;
-	float EndTime;
-	float *Position;
-	float *View;
-	int32_t NumPoints;
-	int32_t *Knots;
+	float time;
+	float endTime;
+	float *position;
+	float *view;
+	int32_t numPoints;
+	int32_t *knots;
 } CameraPath_t;
 
-void CameraInit(Camera_t *Camera, const vec3 Position, const vec3 Right, const vec3 Up, const vec3 Forward);
-matrix CameraUpdate(Camera_t *Camera, float Time);
-void CameraCheckCollision(Camera_t *Camera, float *Vertex, uint32_t *Face, int32_t NumFace);
-int32_t CameraLoadPath(char *filename, CameraPath_t *Path);
-matrix CameraInterpolatePath(CameraPath_t *Path, float TimeStep);
-void CameraDeletePath(CameraPath_t *Path);
+bool CameraIsTargetInFOV(Camera_t camera, vec3 targetPos, float FOV);
+void CameraSeekTargetCamera(Camera_t *camera, Camera_t cameraTarget, RigidBody_t *obstacles, size_t numObstacles);
+void CameraInit(Camera_t *camera, const vec3 position, const vec3 right, const vec3 up, const vec3 forward);
+matrix CameraUpdate(Camera_t *camera, float dt);
+void CameraCheckCollision(Camera_t *camera, float *vertex, uint32_t *face, int32_t numFace);
+int32_t CameraLoadPath(char *filename, CameraPath_t *path);
+matrix CameraInterpolatePath(CameraPath_t *path, float dt);
+void CameraDeletePath(CameraPath_t *path);
 
 #endif

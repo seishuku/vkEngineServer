@@ -1,11 +1,12 @@
 #include "math.h"
 
-vec2 Vec2(const float x, const float y)
+#ifndef VEC_INLINE
+const vec2 Vec2(const float x, const float y)
 {
 	return (vec2) { x, y };
 }
 
-vec2 Vec2b(const float b)
+const vec2 Vec2b(const float b)
 {
 	return (vec2) { b, b };
 }
@@ -71,25 +72,14 @@ float Vec2_Distance(const vec2 Vector1, const vec2 Vector2)
 	return Vec2_Length(Vec2_Subv(Vector2, Vector1));
 }
 
+float Vec2_DistanceSq(const vec2 v0, const vec2 v1)
+{
+	return (v0.x-v1.x)*(v0.x-v1.x)+(v0.y-v1.y)*(v0.y-v1.y);
+}
+
 vec2 Vec2_Reflect(const vec2 N, const vec2 I)
 {
 	return Vec2_Subv(I, Vec2_Muls(N, 2.0f*Vec2_Dot(N, I)));
-}
-
-float Vec2_Normalize(vec2 *v)
-{
-	if(v)
-	{
-		float length=rsqrtf(Vec2_Dot(*v, *v));
-
-		if(length)
-		{
-			*v=Vec2_Muls(*v, length);
-			return 1.0f/length;
-		}
-	}
-
-	return 0.0f;
 }
 
 vec2 Vec2_Lerp(const vec2 a, const vec2 b, const float t)
@@ -101,7 +91,33 @@ vec2 Vec2_Clamp(const vec2 v, const float min, const float max)
 {
 	return (vec2)
 	{
-		min(max(v.x, min), max),
-		min(max(v.y, min), max)
+		fminf(fmaxf(v.x, min), max),
+		fminf(fmaxf(v.y, min), max)
 	};
+}
+
+vec2 Vec2_Clampv(const vec2 v, const vec2 min, const vec2 max)
+{
+	return (vec2)
+	{
+		fminf(fmaxf(v.x, min.x), max.x),
+		fminf(fmaxf(v.y, min.y), max.y)
+	};
+}
+#endif
+
+float Vec2_Normalize(vec2 *v)
+{
+	if(v)
+	{
+		float length=sqrtf(Vec2_Dot(*v, *v));
+
+		if(length)
+		{
+			*v=Vec2_Muls(*v, 1.0f/length);
+			return length;
+		}
+	}
+
+	return 0.0f;
 }

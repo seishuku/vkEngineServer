@@ -1,11 +1,17 @@
 #include "math.h"
 
-vec3 Vec3(const float x, const float y, const float z)
+#ifndef VEC_INLINE
+const vec3 Vec3(const float x, const float y, const float z)
 {
 	return (vec3) { x, y, z };
 }
 
-vec3 Vec3b(const float b)
+const vec3 Vec3_Vec2(const vec2 a, const float z)
+{
+	return (vec3) { .x=a.x, .y=a.y, .z=z };
+}
+
+const vec3 Vec3b(const float b)
 {
 	return (vec3) { b, b, b };
 }
@@ -71,6 +77,11 @@ float Vec3_Distance(const vec3 Vector1, const vec3 Vector2)
 	return Vec3_Length(Vec3_Subv(Vector2, Vector1));
 }
 
+float Vec3_DistanceSq(const vec3 v0, const vec3 v1)
+{
+	return (v0.x-v1.x)*(v0.x-v1.x)+(v0.y-v1.y)*(v0.y-v1.y)+(v0.z-v1.z)*(v0.z-v1.z);
+}
+
 float Vec3_GetAngle(const vec3 Vector1, const vec3 Vector2)
 {
 	return acosf(Vec3_Dot(Vector1, Vector2)/(Vec3_Length(Vector1)*Vec3_Length(Vector2)));
@@ -79,22 +90,6 @@ float Vec3_GetAngle(const vec3 Vector1, const vec3 Vector2)
 vec3 Vec3_Reflect(const vec3 N, const vec3 I)
 {
 	return Vec3_Subv(I, Vec3_Muls(N, 2.0f*Vec3_Dot(N, I)));
-}
-
-float Vec3_Normalize(vec3 *v)
-{
-	if(v)
-	{
-		float length=rsqrtf(Vec3_Dot(*v, *v));
-
-		if(length)
-		{
-			*v=Vec3_Muls(*v, length);
-			return 1.0f/length;
-		}
-	}
-
-	return 0.0f;
 }
 
 vec3 Vec3_Cross(const vec3 v0, const vec3 v1)
@@ -116,8 +111,35 @@ vec3 Vec3_Clamp(const vec3 v, const float min, const float max)
 {
 	return (vec3)
 	{
-		min(max(v.x, min), max),
-		min(max(v.y, min), max),
-		min(max(v.z, min), max)
+		fminf(fmaxf(v.x, min), max),
+		fminf(fmaxf(v.y, min), max),
+		fminf(fmaxf(v.z, min), max)
 	};
+}
+
+vec3 Vec3_Clampv(const vec3 v, const vec3 min, const vec3 max)
+{
+	return (vec3)
+	{
+		fminf(fmaxf(v.x, min.x), max.x),
+		fminf(fmaxf(v.y, min.y), max.y),
+		fminf(fmaxf(v.z, min.z), max.z)
+	};
+}
+#endif
+
+float Vec3_Normalize(vec3 *v)
+{
+	if(v)
+	{
+		float length=Vec3_Length(*v);
+
+		if(length)
+		{
+			*v=Vec3_Muls(*v, 1.0f/length);
+			return length;
+		}
+	}
+
+	return 0.0f;
 }

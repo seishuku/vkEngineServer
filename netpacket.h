@@ -1,6 +1,12 @@
 #ifndef __NETPACKET_H__
 #define __NETPACKET_H__
 
+#include <stdint.h>
+#include <stdbool.h>
+#include "math/math.h"
+#include "camera/camera.h"
+#include "network/network.h"
+
 // Packet magic uint32's
 #define CONNECT_PACKETMAGIC		('C'|('o'<<8)|('n'<<16)|('n'<<24)) // "Conn"
 #define DISCONNECT_PACKETMAGIC	('D'|('i'<<8)|('s'<<16)|('C'<<24)) // "DisC"
@@ -25,39 +31,39 @@
 // Camera data for sending over the network
 typedef struct
 {
-	vec3 Position, Velocity;
-	vec3 Forward, Up;
+	vec3 position, velocity;
+	vec4 orientation;
 } NetCamera_t;
 
 // Connect data when connecting to server
 typedef struct
 {
-	uint32_t Seed;
-	uint16_t Port;
+	uint32_t seed;
+	uint16_t port;
 } NetConnect_t;
 
 // Overall data network packet
 typedef struct
 {
-	uint32_t PacketMagic;
-	uint32_t ClientID;
+	uint32_t packetMagic;
+	uint32_t clientID;
 	union
 	{
-		NetConnect_t Connect;
-		NetCamera_t Camera;
+		NetConnect_t connect;
+		NetCamera_t camera;
 	};
 } NetworkPacket_t;
 
 typedef struct
 {
 	uint32_t clientID;
-	Socket_t Socket;
-	uint32_t Address;
-	uint16_t Port;
+	Socket_t socket;
+	uint32_t address;
+	uint16_t port;
 	bool isConnected;
 	double TTL;
 
-	Camera_t Camera;
+	Camera_t camera;
 } Client_t;
 
 #endif
