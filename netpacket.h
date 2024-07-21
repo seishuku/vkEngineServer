@@ -28,31 +28,27 @@
 // Field:
 //		Server sends current play field (as it sees it) to all connected clients at a regular interval.
 
-// Camera data for sending over the network
-typedef struct
-{
-	vec3 position, velocity;
-	vec4 orientation;
-} NetCamera_t;
+// Status buffer:
+// Magic = 4 bytes
+// connected clients = 4 bytes (could be 1 byte)
+// (potentionally) 16x:
+//		clientID = 4 bytes
+//		camera position = 12 bytes
+//		camera velocity = 12 bytes
+//		camera orientation = 16 bytes
+//
+// Worst case is 712 bytes being sent to all clients.
 
-// Connect data when connecting to server
-typedef struct
-{
-	uint32_t seed;
-	uint16_t port;
-} NetConnect_t;
-
-// Overall data network packet
-typedef struct
-{
-	uint32_t packetMagic;
-	uint32_t clientID;
-	union
-	{
-		NetConnect_t connect;
-		NetCamera_t camera;
-	};
-} NetworkPacket_t;
+// Field buffer:
+// Magic = 4 bytes
+// asteroid count = 4 bytes
+// (potentionally) 1000x:
+//		asteroid position = 12 bytes
+//		asteroid velocity = 12 bytes
+//		asteroid orientation = 16 bytes
+//		asteroid radius = 4 bytes
+//
+// 44008 bytes sent to all connected clients
 
 typedef struct
 {

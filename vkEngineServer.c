@@ -15,6 +15,8 @@
 #include "system/system.h"
 #include "math/math.h"
 #include "utils/list.h"
+#include "utils/lz4.h"
+#include "utils/serial.h"
 #include "math/math.h"
 #include "network/network.h"
 #include "physics/physics.h"
@@ -130,24 +132,6 @@ void delClient(uint32_t ID)
 	connectedClients--;
 }
 
-void Serialize_uint32(uint8_t **Buffer, uint32_t val)
-{
-	memcpy(*Buffer, &val, sizeof(uint32_t));
-	*Buffer+=sizeof(uint32_t);
-}
-
-void Serialize_vec3(uint8_t **Buffer, vec3 val)
-{
-	memcpy(*Buffer, &val, sizeof(vec3));
-	*Buffer+=sizeof(vec3);
-}
-
-void Serialize_vec4(uint8_t **Buffer, vec4 val)
-{
-	memcpy(*Buffer, &val, sizeof(vec4));
-	*Buffer+=sizeof(vec4);
-}
-
 // Build up random data for skybox and asteroid field
 void GenerateWorld(void)
 {
@@ -223,11 +207,13 @@ double statusSendTime=0.0;
 double fieldSendTime=0.0;
 double physicsTime=0.0;
 
+uint8_t fieldBuffer[65536];
+uint8_t statusBuffer[1024];
+
 int main(int argc, char **argv)
 {
 #ifdef WIN32
 	// Set windows console stuff for escape charactors
-	HINSTANCE hInstance=GetModuleHandle(NULL);
 	HANDLE hOutput=GetStdHandle(STD_OUTPUT_HANDLE);
 	DWORD dwMode;
 
@@ -273,57 +259,67 @@ int main(int argc, char **argv)
 		if(_kbhit())
 		{
 #ifdef WIN32
-			if(_getch()==0x1B)
-				done=true;
+			int ch=_getch();
 #else
-			if(getchar()==0x1B)
-				done=true;
+			int ch=getchar();
 #endif
+
+			if(ch==0x1B)
+				done=true;
+			else if(ch=='p')
+				GenerateWorld();
 		}
 
-		NetworkPacket_t packet;
-
-		int32_t length=0;
+		uint8_t *pBuffer=NULL;
 		uint32_t address=0;
 		uint16_t port=0;
 
-		if((length=Network_SocketReceive(serverSocket, (uint8_t *)&packet, sizeof(NetworkPacket_t), &address, &port))>0)
+		memset(statusBuffer, 0, sizeof(statusBuffer));
+		pBuffer=statusBuffer;
+
+		int32_t bytesRec=Network_SocketReceive(serverSocket, statusBuffer, sizeof(statusBuffer), &address, &port);
+
+		if(bytesRec>0)
 		{
 			// Handle incoming connections
-			if(packet.packetMagic==CONNECT_PACKETMAGIC)
+			uint32_t magic=Deserialize_uint32(&pBuffer);
+
+			if(magic==CONNECT_PACKETMAGIC)
 			{
-				DBGPRINTF(DEBUG_WARNING, "\033[25;0H\033[KConnect from: 0x%X port %d", address, port);
+				DBGPRINTF(DEBUG_WARNING, "\033[25;0H\033[KConnect from: %X port %d", address, port);
 
-				NetworkPacket_t response;
-				response.packetMagic=CONNECT_PACKETMAGIC;
-				response.connect.seed=currentSeed;
-				response.connect.port=port;
-				response.clientID=addClient(address, port);
+				uint32_t clientID=addClient(address, port);
 
-				Network_SocketSend(clients[response.clientID].socket, (uint8_t *)&response, sizeof(NetworkPacket_t), address, port);
+				memset(statusBuffer, 0, sizeof(statusBuffer));
+				pBuffer=statusBuffer;
+
+				Serialize_uint32(&pBuffer, CONNECT_PACKETMAGIC);
+				Serialize_uint32(&pBuffer, clientID);
+				Serialize_uint32(&pBuffer, currentSeed);
+				Serialize_uint32(&pBuffer, port);
+
+				Network_SocketSend(clients[clientID].socket, statusBuffer, sizeof(uint32_t)*4, address, port);
 			}
 			// Handle disconnections
-			else if(packet.packetMagic==DISCONNECT_PACKETMAGIC)
+			else if(magic==DISCONNECT_PACKETMAGIC)
 			{
-				DBGPRINTF(DEBUG_WARNING, "\033[%d;0H\033[KDisconnect from: #%d 0x%X:%d",
-						  packet.clientID+1,
-						  packet.clientID,
-						  address,
-						  port
-				);
-				delClient(packet.clientID);
+				uint32_t clientID=Deserialize_uint32(&pBuffer);
+
+				delClient(clientID);
+				DBGPRINTF(DEBUG_WARNING, "\033[%d;0H\033[KDisconnect from: #%d %X:%d", clientID+1, clientID, address, port);
 			}
 			// Handle status reports
-			else if(packet.packetMagic==STATUS_PACKETMAGIC)
+			else if(magic==STATUS_PACKETMAGIC)
 			{
-				Client_t *client=&clients[packet.clientID];
+				uint32_t clientID=Deserialize_uint32(&pBuffer);
+				Client_t *client=&clients[clientID];
 
 				if(client->isConnected)
 				{
 					// Copy camera from packet to client's camera.
-					client->camera.body.position=packet.camera.position;
-					client->camera.body.velocity=packet.camera.velocity;
-					client->camera.body.orientation=packet.camera.orientation;
+					client->camera.body.position=Deserialize_vec3(&pBuffer);
+					client->camera.body.velocity=Deserialize_vec3(&pBuffer);
+					client->camera.body.orientation=Deserialize_vec4(&pBuffer);
 
 					// Update time to live for client "last time heard" (current time +30 seconds).
 					client->TTL=GetClock()+30.0;
@@ -331,23 +327,7 @@ int main(int argc, char **argv)
 			}
 		}
 
-		// 1KB buffer should be enough for now
-		// Magic = 4 bytes
-		// connectedClients = 4 bytes (could be 1 byte)
-		// 16x:
-		//		clientID = 4 bytes
-		//		Camera position = 12 bytes
-		//		Camera velocity = 12 bytes
-		//		Camera forward = 12 bytes
-		//		Camera up = 12 bytes
-		//
-		// Worst case is 840 bytes being sent to all clients, not terrible.
-		uint8_t statusBuffer[1024];
-		uint8_t fieldBuffer[32767];
-		uint8_t *pBuffer;
-
 		const double sixty=1.0/60.0;
-		const double five=1.0/5.0;
 
 		// Get the current time
 		double currentTime=GetClock();
@@ -358,7 +338,6 @@ int main(int argc, char **argv)
 
 			// Clear buffer
 			memset(statusBuffer, 0, sizeof(statusBuffer));
-
 			pBuffer=statusBuffer;
 
 			// Serialize data
@@ -374,10 +353,10 @@ int main(int argc, char **argv)
 					Serialize_uint32(&pBuffer, client->clientID); // Client's ID
 					Serialize_vec3(&pBuffer, client->camera.body.position); // Client camera position
 					Serialize_vec3(&pBuffer, client->camera.body.velocity); // Client camera velocity
-					Serialize_vec4(&pBuffer, client->camera.body.orientation); // Client camera forward (direction)
+					Serialize_vec4(&pBuffer, client->camera.body.orientation); // Client camera orientation
 
 					// Report status to console
-					DBGPRINTF(DEBUG_WARNING, "\033[%d;0H\033[KStatus from 0x%X:%d (ID %d) pos: %0.1f, %0.1f, %0.1f vel: %0.1f, %0.1f, %0.1f orientation: %0.1f %0.1f %0.1f %0.1f",
+					DBGPRINTF(DEBUG_WARNING, "\033[%d;0H\033[KStatus from %X:%d (ID %d) pos: %0.1f, %0.1f, %0.1f vel: %0.1f, %0.1f, %0.1f orientation: %0.1f %0.1f %0.1f %0.1f",
 							  client->clientID+1,
 							  client->address, client->port, client->clientID,
 							  client->camera.body.position.x, client->camera.body.position.y, client->camera.body.position.z,
@@ -398,7 +377,7 @@ int main(int argc, char **argv)
 			for(uint32_t i=0;i<MAX_CLIENTS;i++)
 			{
 				if(clients[i].isConnected)
-					Network_SocketSend(clients[i].socket, statusBuffer, sizeof(statusBuffer), clients[i].address, clients[i].port);
+					Network_SocketSend(clients[i].socket, statusBuffer, (sizeof(uint32_t)*2)+((sizeof(uint32_t)+sizeof(vec3)+sizeof(vec3)+sizeof(vec4))*connectedClients), clients[i].address, clients[i].port);
 			}
 		}
 
@@ -407,25 +386,24 @@ int main(int argc, char **argv)
 		{
 			fieldSendTime=currentTime+sixty;
 
-			uint32_t asteroidCount=NUM_ASTEROIDS;
-			uint32_t magic=FIELD_PACKETMAGIC;
-
 			memset(fieldBuffer, 0, sizeof(fieldBuffer));
-
 			pBuffer=fieldBuffer;
-			Serialize_uint32(&pBuffer, magic);
-			Serialize_uint32(&pBuffer, asteroidCount);
 
-			for(uint32_t i=0;i<asteroidCount;i++)
+			Serialize_uint32(&pBuffer, FIELD_PACKETMAGIC);
+			Serialize_uint32(&pBuffer, NUM_ASTEROIDS);
+
+			for(uint32_t i=0;i<NUM_ASTEROIDS;i++)
 			{
 				Serialize_vec3(&pBuffer, asteroids[i].position);
 				Serialize_vec3(&pBuffer, asteroids[i].velocity);
+				Serialize_vec4(&pBuffer, asteroids[i].orientation);
+				Serialize_float(&pBuffer, asteroids[i].radius);
 			}
 
 			for(uint32_t i=0;i<MAX_CLIENTS;i++)
 			{
 				if(clients[i].isConnected)
-					Network_SocketSend(clients[i].socket, fieldBuffer, sizeof(fieldBuffer), clients[i].address, clients[i].port);
+					Network_SocketSend(clients[i].socket, fieldBuffer, (sizeof(uint32_t)*2)+(((sizeof(vec3)*2)+sizeof(vec4)+sizeof(float))*NUM_ASTEROIDS), clients[i].address, clients[i].port);
 			}
 		}
 
@@ -488,6 +466,8 @@ int main(int argc, char **argv)
 			}
 		}
 	}
+
+	//for(uint32_t i=0;i<connectedClients;i++)
 
 	// Done, close sockets and shutdown
 	Network_SocketClose(serverSocket);
