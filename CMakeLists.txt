@@ -9,6 +9,7 @@ project ("vkEngineServer" LANGUAGES C)
 
 set(PROJECT_SOURCES
 	camera/camera.c
+	math/frustum.c
 	math/math.c
 	math/matrix.c
 	math/quat.c
@@ -16,12 +17,16 @@ set(PROJECT_SOURCES
 	math/vec3.c
 	math/vec4.c
 	network/network.c
-	particle/particle.c
+	network/server_network.c
+	physics/particle.c
 	physics/physics.c
 	system/memzone.c
 	system/threads.c
+	utils/bvh.c
+	utils/id.c
 	utils/list.c
-	utils/lz4.c
+	asteroids.c
+	entitylist.c
 	vkEngineServer.c
 )
 

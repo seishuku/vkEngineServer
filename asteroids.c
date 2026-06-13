@@ -1,0 +1,216 @@
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+#include "system/system.h"
+#include "physics/physics.h"
+#if 0
+#include "assetmanager.h"
+#endif
+#include "entitylist.h"
+#include "asteroids.h"
+
+extern EntityList_t entityList;
+matrix AsteroidTransform(const RigidBody_t *body);
+
+uint32_t numAsteroids=5000;
+RigidBody_t asteroids[MAX_ASTEROIDS];
+
+AsteroidModel_t asteroidModels[MAX_ASTEROIDS];
+
+void ResetAsteroids(void)
+{
+	// Set up rigid body reps for asteroids
+	const float asteroidFieldMinRadius=100.0f;
+	const float asteroidFieldMaxRadius=2000.0f;
+	const float asteroidMinRadius=0.05f;
+	const float asteroidMaxRadius=40.0f;
+
+	uint32_t i=0, tries=0;
+
+	memset(asteroids, 0, sizeof(RigidBody_t)*numAsteroids);
+
+	// Randomly place asteroids in a sphere without any overlapping.
+	while(i<numAsteroids)
+	{
+		vec3 randomDirection=Vec3(
+			RandFloat()*2.0f-1.0f,
+			RandFloat()*2.0f-1.0f,
+			RandFloat()*2.0f-1.0f
+		);
+		vec3 randomDistance=Vec3(
+			RandFloatRange(asteroidFieldMinRadius, asteroidFieldMaxRadius),
+			RandFloatRange(asteroidFieldMinRadius, asteroidFieldMaxRadius),
+			RandFloatRange(asteroidFieldMinRadius, asteroidFieldMaxRadius)
+		);
+		float randomRadius=RandFloatRange(asteroidMinRadius, asteroidMaxRadius);
+
+		Vec3_Normalize(&randomDirection);
+
+		RigidBody_t asteroid={ 0 };
+
+		asteroid.position=Vec3_Mulv(randomDirection, randomDistance);
+		asteroid.radius=randomRadius;
+
+		bool overlapping=false;
+
+		for(uint32_t j=0;j<i;j++)
+		{
+			if(Vec3_Distance(asteroid.position, asteroids[j].position)<asteroid.radius+asteroids[j].radius)
+				overlapping=true;
+		}
+
+		if(!overlapping)
+			asteroids[i++]=asteroid;
+
+		tries++;
+
+		if(tries>numAsteroids*numAsteroids)
+			break;
+	}
+	//////
+
+	// Set up asteroids rigid body
+	for(uint32_t i=0;i<numAsteroids;i++)
+	{
+		vec3 randomDirection=Vec3(
+			RandFloatRange(-1.0f, 1.0f),
+			RandFloatRange(-1.0f, 1.0f),
+			RandFloatRange(-1.0f, 1.0f)
+		);
+		Vec3_Normalize(&randomDirection);
+
+		asteroids[i].velocity=Vec3_Muls(randomDirection, RandFloat());
+		asteroids[i].force=Vec3b(0.0f);
+
+		asteroids[i].orientation=Vec4(0.0f, 0.0f, 0.0f, 1.0f);
+		asteroids[i].angularVelocity=Vec3_Muls(randomDirection, RandFloat());
+
+		asteroids[i].mass=(1.0f/3000.0f)*(1.33333333f*PI*asteroids[i].radius);
+		asteroids[i].invMass=1.0f/asteroids[i].mass;
+
+		asteroids[i].inertia=0.4f*asteroids[i].mass*(asteroids[i].radius*asteroids[i].radius);
+		asteroids[i].invInertia=1.0f/asteroids[i].inertia;
+
+		asteroids[i].restitution=0.8f;
+		asteroids[i].friction=0.5f;
+
+		asteroids[i].type=RIGIDBODY_SPHERE;
+
+		asteroidModels[i].variant=RandRange(0, 3);
+	}
+	//////
+}
+
+void AddAsteroid(vec3 position, vec3 velocity, float radius, uint32_t variant)
+{
+	if(numAsteroids>=MAX_ASTEROIDS)
+		return;
+ 
+	vec3 randomDirection=Vec3(
+		RandFloatRange(-1.0f, 1.0f),
+		RandFloatRange(-1.0f, 1.0f),
+		RandFloatRange(-1.0f, 1.0f)
+	);
+	Vec3_Normalize(&randomDirection);
+ 
+	const float mass=(1.0f/3000.0f)*(1.33333333f*PI*radius);
+ 
+	RigidBody_t asteroid={
+		.position=position,
+ 
+		.velocity=velocity,
+		.force=Vec3b(0.0f),
+ 
+		.orientation=Vec4(0.0f, 0.0f, 0.0f, 1.0f),
+		.angularVelocity=Vec3_Muls(randomDirection, RandFloat()),
+ 
+		.mass=mass,
+		.inertia=0.4f*mass*(radius*radius),
+ 
+		.restitution=0.8f,
+		.friction=0.5f,
+ 
+		.type=RIGIDBODY_SPHERE,
+		.radius=radius,
+	};
+ 
+	asteroid.invMass=1.0f/asteroid.mass;
+	asteroid.invInertia=1.0f/asteroid.inertia;
+ 
+	asteroidModels[numAsteroids].variant=min(3, max(0, variant));
+ 
+	asteroids[numAsteroids]=asteroid;
+	asteroidModels[numAsteroids].entityID=EntityList_Add(&entityList, &asteroids[numAsteroids], false, asteroidModels[numAsteroids].variant, 0, 0, ENTITYOBJECTTYPE_FIELD, NULL);
+	numAsteroids++;
+}
+
+#define MIN_SPLIT_RADIUS 2.0f
+
+void SplitAsteroid(uint32_t index, ContactPoint_t contact, float impactSpeed)
+{
+	if(index>=numAsteroids)
+		return;
+ 
+	// Save what we need from the host before removing it.
+	const float hostRadius=asteroids[index].radius;
+	const vec3  hostVelocity=asteroids[index].velocity;
+ 
+	// Remove the rigid body, but keep the model and textures
+	numAsteroids--;
+	asteroids[index]=asteroids[numAsteroids];
+
+	EntityList_Remove(&entityList, asteroidModels[index].entityID);
+ 
+	asteroidModels[index]=asteroidModels[numAsteroids];
+
+	// Asteroid too small
+	if(hostRadius*0.5f<MIN_SPLIT_RADIUS)
+		return;
+ 
+	const uint32_t numFragments=RandRange(3, 100);
+ 
+	const float volumeTransfer=RandFloatRange(0.15f, 0.35f);
+ 
+	float weights[100], totalWeight=0.0f;
+	for(uint32_t i=0;i<numFragments;i++)
+	{
+		const float r=RandFloat();
+		weights[i]=r*r;
+		totalWeight+=weights[i];
+	}
+ 
+	const float spread=1.5f/(1.0f+impactSpeed*0.1f);
+ 
+	for(uint32_t i=0;i<numFragments;i++)
+	{
+		const float volumeFraction=(weights[i]/totalWeight)*volumeTransfer;
+		const float fragmentRadius=cbrtf(volumeFraction)*hostRadius;
+ 
+		if(fragmentRadius<MIN_SPLIT_RADIUS)
+			continue;
+ 
+		vec3 randVec=Vec3(
+			RandFloatRange(-1.0f, 1.0f),
+			RandFloatRange(-1.0f, 1.0f),
+			RandFloatRange(-1.0f, 1.0f)
+		);
+		vec3 perp=Vec3_Subv(randVec, Vec3_Muls(contact.normal, Vec3_Dot(randVec, contact.normal)));
+		Vec3_Normalize(&perp);
+ 
+		vec3 ejectDir=Vec3_Addv(contact.normal, Vec3_Muls(perp, spread));
+		Vec3_Normalize(&ejectDir);
+ 
+		// v ∝ 1/r: smaller fragments travel faster for the same impulse.
+		const float ejectionSpeed=impactSpeed*(hostRadius/fragmentRadius);
+		vec3 spawnVel=Vec3_Addv(hostVelocity, Vec3_Muls(ejectDir, ejectionSpeed));
+		vec3 spawnPos=Vec3_Addv(contact.position, Vec3_Muls(ejectDir, fragmentRadius*1.5f));
+ 
+		// Spawn new asteroids, keeping parent model variant
+		AddAsteroid(spawnPos, spawnVel, fragmentRadius, asteroidModels[index].variant);
+ 
+		vec3 tumbleAxis=Vec3_Cross(ejectDir, contact.normal);
+		Vec3_Normalize(&tumbleAxis);
+		const float tumbleRate=impactSpeed*(hostRadius*hostRadius/(fragmentRadius*fragmentRadius));
+		asteroids[numAsteroids-1].angularVelocity=Vec3_Muls(tumbleAxis, tumbleRate*0.05f);
+	}
+}

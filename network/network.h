@@ -16,4 +16,8 @@ bool Network_SocketSend(Socket_t sock, uint8_t *packet, uint32_t packet_size, ui
 int32_t Network_SocketReceive(Socket_t sock, uint8_t *buffer, uint32_t buffer_size, uint32_t *address, uint16_t *port);
 bool Network_SocketClose(Socket_t sock);
 
+void Network_ResetCounters(void);
+extern float Network_AvgBytesSent;
+extern float Network_AvgBytesReceived;
+
 #endif

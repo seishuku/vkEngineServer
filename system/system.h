@@ -61,4 +61,17 @@ extern MemZone_t *zone;
 
 double GetClock(void);
 
+static inline void SleepMS(uint32_t ms)
+{
+#ifdef WIN32
+    Sleep(ms);
+#else
+    struct timespec ts={
+        .tv_sec=ms/1000,
+        .tv_nsec=(ms%1000)*1000000L,
+    };
+    nanosleep(&ts, NULL);
+#endif
+}
+
 #endif

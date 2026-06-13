@@ -4,13 +4,20 @@
 #include "../math/math.h"
 
 // Define constants
-#define WORLD_SCALE 1000.0f
-#define EXPLOSION_POWER (50.0f*WORLD_SCALE)
+#define WORLD_SCALE 10.0f
+#define EXPLOSION_POWER (1500.0f*WORLD_SCALE)
+
+typedef enum
+{
+	RIGIDBODY_OBB=0,
+	RIGIDBODY_SPHERE,
+	RIGIDBODY_CAPSULE,
+	MAX_RIGIDBODYTYPE
+} RigidBodyType_e;
 
 typedef struct RigidBody_s
 {
 	vec3 position;
-
 	vec3 velocity;
 	vec3 force;
 	float mass, invMass;
@@ -19,13 +26,50 @@ typedef struct RigidBody_s
 	vec3 angularVelocity;
 	float inertia, invInertia;
 
-	float radius;	// radius if it's a sphere
-	vec3 size;		// bounding box if it's an AABB
+	float restitution;
+	float friction;
+
+	RigidBodyType_e type;	// OBB, sphere, capsule
+	union
+	{
+		float radius;
+		vec3 size;				
+		vec2 radiusHeight;
+	}; // Type dimensions
 } RigidBody_t;
+
+typedef struct
+{
+	vec3 position, normal;
+	float penetration;
+} ContactPoint_t;
+
+#define MAX_CONTACTS_PER_MANIFOLD 8
+
+typedef struct
+{
+	RigidBody_t *a, *b;
+	ContactPoint_t contacts[MAX_CONTACTS_PER_MANIFOLD];
+	uint32_t contactCount;
+} CollisionManifold_t;
 
 void PhysicsIntegrate(RigidBody_t *body, const float dt);
 void PhysicsExplode(RigidBody_t *body);
-float PhysicsSphereToSphereCollisionResponse(RigidBody_t *a, RigidBody_t *b);
-float PhysicsSphereToAABBCollisionResponse(RigidBody_t *sphere, RigidBody_t *aabb);
+void PhysicsApplyImpulse(RigidBody_t *body, const vec3 impulse, const vec3 point);
+float PhysicsResolveCollision(RigidBody_t *a, RigidBody_t *b, ContactPoint_t contact);
+void PhysicsPositionCorrection(RigidBody_t *a, RigidBody_t *b, ContactPoint_t contact);
+CollisionManifold_t PhysicsCollision(RigidBody_t *a, RigidBody_t *b);
+
+typedef struct
+{
+	vec3 position;
+	vec3 velocity;
+	float stiffness;
+	float damping;
+	float length;
+	float mass, invMass;
+} Spring_t;
+
+void SpringIntegrate(Spring_t *spring, vec3 target, float dt);
 
 #endif

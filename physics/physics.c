@@ -1,9 +1,11 @@
 #include <stdint.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <float.h>
 #include "physics.h"
 
-static void applyConstraints(RigidBody_t *body)
+static void ApplyConstraints(RigidBody_t *body, const float dt)
 {
 	vec3 center={ 0.0f, 0.0f, 0.0f };
 	const float maxRadius=2000.0f;
@@ -15,25 +17,26 @@ static void applyConstraints(RigidBody_t *body)
 	// Check for collision with outer boundary sphere and reflect velocity if needed
 	vec3 normal=Vec3_Subv(body->position, center);
 
-	float distanceSq=Vec3_Dot(normal, normal);
-	const float radiiSum=(maxRadius*maxRadius)-(body->radius*body->radius);
+	float distanceSq=Vec3_LengthSq(normal);
+	const float maxRadiusMinusRadius = maxRadius - body->radius;
+	const float boundarySq = maxRadiusMinusRadius * maxRadiusMinusRadius;
 
-	if(distanceSq>radiiSum)
+	if(distanceSq > boundarySq)
 	{
 		const float distance=Vec3_Normalize(&normal);
-		body->velocity=Vec3_Addv(body->velocity, Vec3_Muls(normal, -distance));
+		const float penetration = distance + body->radius - maxRadius;
+		body->force=Vec3_Addv(body->force, Vec3_Muls(normal, -penetration * 100.0f)); // Arbitrary stiffness
 	}
 
-	// Apply linear velocity damping
-	//const float linearDamping=0.998f;
-	//body->velocity=Vec3_Muls(body->velocity, linearDamping);
+	// Dampen velocity
+	const float lambda=0.1f;
+	const float decay=expf(-lambda*dt);
 
-	// Apply angular velocity damping
-	const float angularDamping=0.998f;
-	body->angularVelocity=Vec3_Muls(body->angularVelocity, angularDamping);
+	body->velocity=Vec3_Muls(body->velocity, decay);
+	body->angularVelocity=Vec3_Muls(body->angularVelocity, decay);
 }
 
-vec4 integrateAngularVelocity(const vec4 q, const vec3 w, const float dt)
+static vec4 IntegrateAngularVelocity(const vec4 q, const vec3 w, const float dt)
 {
 	const float halfDT=0.5f*dt;
 
@@ -62,9 +65,12 @@ vec4 integrateAngularVelocity(const vec4 q, const vec3 w, const float dt)
 	return result;
 }
 
+#include "../camera/camera.h"
+extern Camera_t camera;
+
 void PhysicsIntegrate(RigidBody_t *body, const float dt)
 {
-	//const vec3 gravity=Vec3(0.0f, 9.81f*WORLD_SCALE, 0.0f);
+	// const vec3 gravity=Vec3(0.0f, -9.81f*WORLD_SCALE, 0.0f);
 	const vec3 gravity=Vec3b(0.0f);
 
 	// Apply gravity
@@ -80,9 +86,9 @@ void PhysicsIntegrate(RigidBody_t *body, const float dt)
 	body->force=Vec3b(0.0f);
 
 	// Integrate angular velocity using quaternions
-	body->orientation=integrateAngularVelocity(body->orientation, body->angularVelocity, dt);
+	body->orientation=IntegrateAngularVelocity(body->orientation, body->angularVelocity, dt);
 
-	applyConstraints(body);
+	ApplyConstraints(body, dt);
 }
 
 void PhysicsExplode(RigidBody_t *body)
@@ -103,178 +109,737 @@ void PhysicsExplode(RigidBody_t *body)
 	body->velocity=Vec3_Addv(body->velocity, force);
 }
 
-float PhysicsSphereToSphereCollisionResponse(RigidBody_t *a, RigidBody_t *b)
+void PhysicsApplyImpulse(RigidBody_t *body, const vec3 impulse, const vec3 point)
 {
-	const vec3 relativePosition=Vec3_Subv(b->position, a->position);
-	const float distanceSq=Vec3_Dot(relativePosition, relativePosition);
-	const float radiiSum=a->radius+b->radius;
+	// Linear impulse
+	body->velocity=Vec3_Addv(body->velocity, Vec3_Muls(impulse, body->invMass));
 
-	if(distanceSq<radiiSum*radiiSum)
-	{
-		const float distance=sqrtf(distanceSq);
-		const vec3 normal=Vec3_Muls(relativePosition, 1.0f/distance);
+	// Torque arm in local space
+	const vec3 torque=Vec3_Cross(Vec3_Subv(point, body->position), impulse);
+	const vec3 localTorque=QuatRotate(QuatInverse(body->orientation), torque);
 
-		// Point of contact
-		const float penetration=fabsf(distance-radiiSum)*0.5f;
-		const vec3 contact=Vec3_Addv(a->position, Vec3_Muls(normal, a->radius-penetration));
-
-		// Torque arms
-		const vec3 r1=Vec3_Subv(contact, a->position);
-		const vec3 r2=Vec3_Subv(contact, b->position);
-
-		const vec3 relativeVel=Vec3_Subv(
-			Vec3_Addv(b->velocity, Vec3_Cross(b->angularVelocity, r2)),
-			Vec3_Addv(a->velocity, Vec3_Cross(a->angularVelocity, r1))
-		);
-
-		const float relativeSpeed=Vec3_Dot(relativeVel, normal);
-
-		if(relativeSpeed>0.0f)
-			return 0.0f;
-
-		// Masses
-		const vec3 d1=Vec3_Cross(Vec3_Muls(Vec3_Cross(r1, normal), a->invInertia), r1);
-		const vec3 d2=Vec3_Cross(Vec3_Muls(Vec3_Cross(r2, normal), b->invInertia), r2);
-		const float invMassSum=a->invMass+b->invMass;
-
-		const float e=0.8f;
-		const float j=-(1.0f+e)*relativeSpeed/(invMassSum+Vec3_Dot(normal, Vec3_Addv(d1, d2)));
-
-		const vec3 impulse=Vec3_Muls(normal, j);
-
-		// Head-on collision velocities
-		a->velocity=Vec3_Subv(a->velocity, Vec3_Muls(impulse, a->invMass));
-		b->velocity=Vec3_Addv(b->velocity, Vec3_Muls(impulse, b->invMass));
-
-		a->angularVelocity=Vec3_Subv(a->angularVelocity, Vec3_Muls(Vec3_Cross(r1, impulse), a->invInertia));
-		b->angularVelocity=Vec3_Addv(b->angularVelocity, Vec3_Muls(Vec3_Cross(r2, impulse), b->invInertia));
-
-		// Calculate tangential velocities
-		vec3 tangentialVel=Vec3_Subv(relativeVel, Vec3_Muls(normal, Vec3_Dot(relativeVel, normal)));
-		Vec3_Normalize(&tangentialVel);
-
-		const vec3 d1T=Vec3_Cross(Vec3_Muls(Vec3_Cross(r1, tangentialVel), a->invInertia), r1);
-		const vec3 d2T=Vec3_Cross(Vec3_Muls(Vec3_Cross(r2, tangentialVel), b->invInertia), r2);
-
-		const float friction=sqrtf(0.5f*0.5f);
-		const float maxjT=friction*j;
-
-		float jT=-Vec3_Dot(relativeVel, tangentialVel)/(invMassSum+Vec3_Dot(tangentialVel, Vec3_Addv(d1T, d2T)));
-
-		if(jT>maxjT)
-			jT=maxjT;
-		else if(jT<-maxjT)
-			jT=-maxjT;
-
-		const vec3 impulseT=Vec3_Muls(tangentialVel, jT);
-
-		a->velocity=Vec3_Subv(a->velocity, Vec3_Muls(impulseT, a->invMass));
-		b->velocity=Vec3_Addv(b->velocity, Vec3_Muls(impulseT, b->invMass));
-
-		a->angularVelocity=Vec3_Subv(a->angularVelocity, Vec3_Muls(Vec3_Cross(r1, impulseT), a->invInertia));
-		b->angularVelocity=Vec3_Addv(b->angularVelocity, Vec3_Muls(Vec3_Cross(r2, impulseT), b->invInertia));
-
-		const vec3 correctionVector=Vec3_Muls(normal, penetration/invMassSum*1.0f);
-
-		a->position=Vec3_Subv(a->position, Vec3_Muls(correctionVector, a->invMass));
-		b->position=Vec3_Addv(b->position, Vec3_Muls(correctionVector, b->invMass));
-
-		return sqrtf(-relativeSpeed);
-	}
-
-	return 0.0f;
+	// Update angular velocity
+	body->angularVelocity=Vec3_Addv(body->angularVelocity, Vec3_Muls(localTorque, body->invInertia));
 }
 
-float PhysicsSphereToAABBCollisionResponse(RigidBody_t *sphere, RigidBody_t *aabb)
+float PhysicsResolveCollision(RigidBody_t *a, RigidBody_t *b, ContactPoint_t contact)
 {
-	// Calculate the half extents of the AABB
-	const vec3 half=Vec3_Muls(aabb->size, 0.5f);
+	// Torque arms
+	const vec3 r1=Vec3_Subv(contact.position, a->position);
+	const vec3 r2=Vec3_Subv(contact.position, b->position);
 
-	// Calculate the AABB's min and max points
-	const vec3 aabbMin=Vec3_Subv(aabb->position, half);
-	const vec3 aabbMax=Vec3_Addv(aabb->position, half);
+    const vec3 wA=QuatRotate(a->orientation, a->angularVelocity);
+    const vec3 wB=QuatRotate(b->orientation, b->angularVelocity);
 
-	// Find the closest point on the AABB to the sphere
-	const vec3 closest=Vec3_Clampv(sphere->position, aabbMin, aabbMax);
+	const vec3 relativeVel=Vec3_Subv(
+        Vec3_Addv(b->velocity, Vec3_Cross(wB, r2)),
+        Vec3_Addv(a->velocity, Vec3_Cross(wA, r1))
+    );
 
-	// Calculate the distance between the closest point and the sphere's center
-	vec3 relativePosition=Vec3_Subv(closest, sphere->position);
+	const float relativeSpeed=Vec3_Dot(relativeVel, contact.normal);
 
-	const float distanceSq=Vec3_Dot(relativePosition, relativePosition);
+	if(relativeSpeed>0.0f)
+		return 0.0f;
 
-	// Check if the distance is less than the sphere's radius
-	if(distanceSq<=sphere->radius*sphere->radius&&distanceSq)
+	// Masses
+	const vec3 d1=Vec3_Cross(Vec3_Muls(Vec3_Cross(r1, contact.normal), a->invInertia), r1);
+	const vec3 d2=Vec3_Cross(Vec3_Muls(Vec3_Cross(r2, contact.normal), b->invInertia), r2);
+	const float invMassSum=a->invMass+b->invMass;
+
+	const float e=fminf(a->restitution, b->restitution);
+	const float j=-(1.0f+e)*relativeSpeed/(invMassSum+Vec3_Dot(contact.normal, Vec3_Addv(d1, d2)));
+
+	const vec3 impulse=Vec3_Muls(contact.normal, j);
+
+	// Head-on collision velocities
+
+    // Linear velocity
+	a->velocity=Vec3_Subv(a->velocity, Vec3_Muls(impulse, a->invMass));
+	b->velocity=Vec3_Addv(b->velocity, Vec3_Muls(impulse, b->invMass));
+
+    // Pre-calculate inverse orientation quats
+	const vec4 invOrientationA=QuatInverse(a->orientation);
+	const vec4 invOrientationB=QuatInverse(b->orientation);
+
+	// Transform torque to local space
+	vec3 localTorqueA=QuatRotate(invOrientationA, Vec3_Cross(r1, impulse));
+	vec3 localTorqueB=QuatRotate(invOrientationB, Vec3_Cross(r2, impulse));
+
+    // Angular velocity
+	a->angularVelocity=Vec3_Subv(a->angularVelocity, Vec3_Muls(localTorqueA, a->invInertia));
+	b->angularVelocity=Vec3_Addv(b->angularVelocity, Vec3_Muls(localTorqueB, b->invInertia));
+
+	// Calculate tangential velocities
+	vec3 tangentialVel=Vec3_Subv(relativeVel, Vec3_Muls(contact.normal, Vec3_Dot(relativeVel, contact.normal)));
+    Vec3_Normalize(&tangentialVel);
+
+	const vec3 d1T=Vec3_Cross(Vec3_Muls(Vec3_Cross(r1, tangentialVel), a->invInertia), r1);
+	const vec3 d2T=Vec3_Cross(Vec3_Muls(Vec3_Cross(r2, tangentialVel), b->invInertia), r2);
+
+	const float friction=sqrtf(a->friction*b->friction);
+	const float maxjT=friction*j;
+
+	const float jT=clampf(-Vec3_Dot(relativeVel, tangentialVel)/(invMassSum+Vec3_Dot(tangentialVel, Vec3_Addv(d1T, d2T))), -maxjT, maxjT);
+
+	const vec3 impulseT=Vec3_Muls(tangentialVel, jT);
+
+	// Linear frictional velocity
+	a->velocity=Vec3_Subv(a->velocity, Vec3_Muls(impulseT, a->invMass));
+	b->velocity=Vec3_Addv(b->velocity, Vec3_Muls(impulseT, b->invMass));
+
+	// Angular frictional velocity
+	localTorqueA=QuatRotate(invOrientationA, Vec3_Cross(r1, impulseT));
+	localTorqueB=QuatRotate(invOrientationB, Vec3_Cross(r2, impulseT));
+
+	a->angularVelocity=Vec3_Subv(a->angularVelocity, Vec3_Muls(localTorqueA, a->invInertia));
+	b->angularVelocity=Vec3_Addv(b->angularVelocity, Vec3_Muls(localTorqueB, b->invInertia));
+
+    return sqrtf(-relativeSpeed);
+}
+
+void PhysicsPositionCorrection(RigidBody_t *a, RigidBody_t *b, ContactPoint_t contact)
+{
+	const float penetration=contact.penetration;
+	const vec3 normal=contact.normal;
+	const float invMassSum=a->invMass+b->invMass;
+
+	if(invMassSum>FLT_EPSILON)
 	{
-		const float distance=sqrtf(distanceSq);
-		const vec3 normal=Vec3_Muls(relativePosition, 1.0f/distance);
+		const float penetrationSlop=0.01f;
+		const float percent=0.2f;
+		const float correctionAmount=fmaxf(penetration-penetrationSlop, 0.0f)*percent;
+		const vec3 correction=Vec3_Muls(normal, correctionAmount/invMassSum);
 
-		// Point of contact
-		const float penetration=fabsf(distance-sphere->radius)*0.5f;
-		const vec3 contact=Vec3_Addv(sphere->position, Vec3_Muls(normal, penetration));
+		a->position=Vec3_Subv(a->position, Vec3_Muls(correction, a->invMass));
+		b->position=Vec3_Addv(b->position, Vec3_Muls(correction, b->invMass));
+	}
+}
 
-		// Torque arms
-		const vec3 r1=Vec3_Subv(contact, sphere->position);
-		const vec3 r2=Vec3_Subv(contact, aabb->position);
+static CollisionManifold_t SphereToSphereCollision(RigidBody_t *a, RigidBody_t *b)
+{
+	const vec3 relativePosition=Vec3_Subv(b->position, a->position);
+	const float distanceSq=Vec3_LengthSq(relativePosition);
+	const float radiiSum=a->radius+b->radius;
 
-		const vec3 relativeVel=Vec3_Subv(
-			Vec3_Addv(aabb->velocity, Vec3_Cross(aabb->angularVelocity, r2)),
-			Vec3_Addv(sphere->velocity, Vec3_Cross(sphere->angularVelocity, r1))
-		);
+	if(distanceSq>radiiSum*radiiSum)
+		return (CollisionManifold_t) { 0 };
 
-		const float relativeSpeed=Vec3_Dot(relativeVel, normal);
+	// Penetration
+	const float distance=fmaxf(sqrtf(distanceSq), FLT_EPSILON);
+	const float penetration=radiiSum-distance;
 
-		if(relativeSpeed>0.0f)
-			return 0.0f;
+	// Normal
+	const vec3 normal=Vec3_Muls(relativePosition, 1.0f/distance);
 
-		// Masses
-		const vec3 d1=Vec3_Cross(Vec3_Muls(Vec3_Cross(r1, normal), sphere->invInertia), r1);
-		const vec3 d2=Vec3_Cross(Vec3_Muls(Vec3_Cross(r2, normal), aabb->invInertia), r2);
-		const float invMassSum=sphere->invMass+aabb->invMass;
+	// Contact point
+	const vec3 contact=Vec3_Addv(a->position, Vec3_Muls(normal, a->radius-penetration*0.5f));
 
-		const float e=0.8f;
-		const float j=-(1.0f+e)*relativeSpeed/(invMassSum+Vec3_Dot(normal, Vec3_Addv(d1, d2)));
+	CollisionManifold_t manifold;
+	manifold.a=a;
+	manifold.b=b;
+	manifold.contacts[0].position=contact;
+	manifold.contacts[0].normal=normal;
+	manifold.contacts[0].penetration=penetration;
+	manifold.contactCount=1;
 
-		const vec3 impulse=Vec3_Muls(normal, j);
+	return manifold;
+}
 
-		// Head-on collision velocities
-		sphere->velocity=Vec3_Subv(sphere->velocity, Vec3_Muls(impulse, sphere->invMass));
-		aabb->velocity=Vec3_Addv(aabb->velocity, Vec3_Muls(impulse, aabb->invMass));
+static CollisionManifold_t SphereToOBBCollision(RigidBody_t *sphere, RigidBody_t *obb)
+{
+	vec3 axes[3];
+	QuatAxes(obb->orientation, axes);
 
-		sphere->angularVelocity=Vec3_Subv(sphere->angularVelocity, Vec3_Muls(Vec3_Cross(r1, impulse), sphere->invInertia));
-		aabb->angularVelocity=Vec3_Addv(aabb->angularVelocity, Vec3_Muls(Vec3_Cross(r2, impulse), aabb->invInertia));
+	const vec3 relativeCenter=Vec3_Subv(sphere->position, obb->position);
+	vec3 closestPoint=obb->position;
+	closestPoint=Vec3_Addv(closestPoint, Vec3_Muls(axes[0], fmaxf(-obb->size.x, fminf(Vec3_Dot(relativeCenter, axes[0]), obb->size.x))));
+	closestPoint=Vec3_Addv(closestPoint, Vec3_Muls(axes[1], fmaxf(-obb->size.y, fminf(Vec3_Dot(relativeCenter, axes[1]), obb->size.y))));
+	closestPoint=Vec3_Addv(closestPoint, Vec3_Muls(axes[2], fmaxf(-obb->size.z, fminf(Vec3_Dot(relativeCenter, axes[2]), obb->size.z))));
 
-		// Calculate tangential velocities
-		vec3 tangentialVel=Vec3_Subv(relativeVel, Vec3_Muls(normal, Vec3_Dot(relativeVel, normal)));
-		Vec3_Normalize(&tangentialVel);
+	const vec3 relativePosition=Vec3_Subv(sphere->position, closestPoint);
+	const float distanceSq=Vec3_LengthSq(relativePosition);
 
-		const vec3 d1T=Vec3_Cross(Vec3_Muls(Vec3_Cross(r1, tangentialVel), sphere->invInertia), r1);
-		const vec3 d2T=Vec3_Cross(Vec3_Muls(Vec3_Cross(r2, tangentialVel), aabb->invInertia), r2);
-
-		const float friction=sqrtf(0.5f*0.5f);
-		const float maxjT=friction*j;
-
-		float jT=-Vec3_Dot(relativeVel, tangentialVel)/(invMassSum+Vec3_Dot(tangentialVel, Vec3_Addv(d1T, d2T)));
-
-		if(jT>maxjT)
-			jT=maxjT;
-		else if(jT<-maxjT)
-			jT=-maxjT;
-
-		const vec3 impulseT=Vec3_Muls(tangentialVel, jT);
-
-		sphere->velocity=Vec3_Subv(sphere->velocity, Vec3_Muls(impulseT, sphere->invMass));
-		aabb->velocity=Vec3_Addv(aabb->velocity, Vec3_Muls(impulseT, aabb->invMass));
-
-		sphere->angularVelocity=Vec3_Subv(sphere->angularVelocity, Vec3_Muls(Vec3_Cross(r1, impulseT), sphere->invInertia));
-		aabb->angularVelocity=Vec3_Addv(aabb->angularVelocity, Vec3_Muls(Vec3_Cross(r2, impulseT), aabb->invInertia));
-
-		const vec3 correctionVector=Vec3_Muls(normal, penetration/invMassSum*1.0f);
-
-		sphere->position=Vec3_Subv(sphere->position, Vec3_Muls(correctionVector, sphere->invMass));
-		//aabb->position=Vec3_Addv(aabb->position, Vec3_Muls(correctionVector, aabb->invMass));
-
-		return sqrtf(-relativeSpeed);
+	if(distanceSq>sphere->radius*sphere->radius)
+	{
+		// No collision
+		return (CollisionManifold_t) { 0 };
 	}
 
-	return 0.0f;
+	// Penetration
+	const float distance=fmaxf(sqrtf(distanceSq), FLT_EPSILON);
+	const float penetration=sphere->radius-distance;
+
+	// Normal
+	const vec3 normal=Vec3_Muls(relativePosition, 1.0f/distance);
+
+	// Contact point
+	const vec3 contact=Vec3_Subv(closestPoint, Vec3_Muls(normal, penetration*0.5f));
+
+	CollisionManifold_t manifold;
+	manifold.b=sphere;
+	manifold.a=obb;
+	manifold.contacts[0].position=contact;
+	manifold.contacts[0].normal=normal;
+	manifold.contacts[0].penetration=penetration;
+	manifold.contactCount=1;
+
+	return manifold;
+}
+
+static uint32_t ClipPolygon(const vec3 *in, uint32_t inCount, vec3 *out, uint32_t maxOut, vec3 planeNormal, float planeDist)
+{
+    uint32_t outCount=0;
+
+	if(inCount==0)
+        return 0;
+
+    for(uint32_t i=0;i<inCount;i++)
+    {
+        const vec3  curr=in[i];
+        const vec3  next=in[(i+1)%inCount];
+        const float dc=Vec3_Dot(curr, planeNormal)-planeDist;
+        const float dn=Vec3_Dot(next, planeNormal)-planeDist;
+        const bool insideC=(dc<=0.0f);
+        const bool insideN=(dn<=0.0f);
+
+        if(insideC&&outCount<maxOut)
+            out[outCount++] = curr;
+
+		if(insideC!=insideN&&outCount<maxOut)
+            out[outCount++]=Vec3_Addv(curr, Vec3_Muls(Vec3_Subv(next, curr), dc/(dc-dn)));
+    }
+
+    return outCount;
+}
+
+static bool TestSATAxis(vec3 axis, const vec3 axesA[3], vec3 sA, const vec3 axesB[3], vec3 sB, vec3 relPos, uint32_t axisIndex, float *penetration, vec3 *normal, uint32_t *minAxisIndex)
+{
+	const float rA=fabsf(Vec3_Dot(axesA[0], axis))*sA.x+fabsf(Vec3_Dot(axesA[1], axis))*sA.y+fabsf(Vec3_Dot(axesA[2], axis))*sA.z;
+    const float rB=fabsf(Vec3_Dot(axesB[0], axis))*sB.x+fabsf(Vec3_Dot(axesB[1], axis))*sB.y+fabsf(Vec3_Dot(axesB[2], axis))*sB.z;
+    const float dist=fabsf(Vec3_Dot(relPos, axis));
+    float overlap=rA+rB-dist;
+
+	// Separating axis found — no collision.
+    if(overlap<-FLT_EPSILON)
+		return false;
+
+    overlap=fmaxf(overlap, 0.0f);
+
+    if(overlap<*penetration)
+	{
+		*penetration=overlap;
+		*normal=axis;
+		*minAxisIndex=axisIndex;
+	}
+
+	return true;
+}
+
+static bool TestCrossSATAxis(vec3 edgeA, vec3 edgeB, const vec3 axesA[3], vec3 sA, const vec3 axesB[3], vec3 sB, vec3 relPos, uint32_t axisIndex, float *penetration, vec3 *normal, uint32_t *minAxisIndex)
+{
+	vec3 axis=Vec3_Cross(edgeA, edgeB);
+
+	if(Vec3_Normalize(&axis)<=FLT_EPSILON)
+		return true;
+
+    return TestSATAxis(axis, axesA, sA, axesB, sB, relPos, axisIndex, penetration, normal, minAxisIndex);
+}
+
+static void ReduceManifoldContacts(CollisionManifold_t *m)
+{
+	if(m->contactCount<=4)
+		return;
+
+	// Keep the deepest penetration first.
+	uint32_t bestIndex=0;
+
+	for(uint32_t i=1;i<m->contactCount;i++)
+	{
+		if(m->contacts[i].penetration>m->contacts[bestIndex].penetration)
+			bestIndex=i;
+	}
+
+	ContactPoint_t reduced[4]={ m->contacts[bestIndex] };
+	m->contacts[bestIndex]=m->contacts[--m->contactCount];
+
+	// Greedily pick the point farthest from the current set.
+	uint32_t reducedCount=1;
+
+	while(reducedCount<4&&m->contactCount>0)
+	{
+		float bestDistance=-1.0f;
+		uint32_t bestCandidate=0;
+
+		for(uint32_t i=0;i<m->contactCount;i++)
+		{
+			const vec3 candidatePos=m->contacts[i].position;
+			float nearestDistance=FLT_MAX;
+
+			for(uint32_t j=0;j<reducedCount;j++)
+			{
+				const float distance=Vec3_LengthSq(Vec3_Subv(candidatePos, reduced[j].position));
+
+				if(distance<nearestDistance)
+					nearestDistance=distance;
+			}
+
+			if(nearestDistance>bestDistance)
+			{
+				bestDistance=nearestDistance;
+				bestCandidate=i;
+			}
+		}
+
+		reduced[reducedCount++]=m->contacts[bestCandidate];
+		m->contacts[bestCandidate]=m->contacts[--m->contactCount];
+	}
+
+	m->contactCount=reducedCount;
+
+	for(uint32_t i=0;i<reducedCount;i++)
+		m->contacts[i]=reduced[i];
+}
+
+#define MAX_CLIP_VERTS 16
+
+static CollisionManifold_t OBBToOBBCollision(RigidBody_t *a, RigidBody_t *b)
+{
+    // Extract axes
+    vec3 axesA[3], axesB[3];
+    QuatAxes(a->orientation, axesA);
+    QuatAxes(b->orientation, axesB);
+
+    const vec3 relPos=Vec3_Subv(b->position, a->position);
+
+	float penetration=FLT_MAX;
+	vec3 normal=Vec3b(0.0f);
+	uint32_t minAxisIndex=0;
+
+    if(!TestSATAxis(axesA[0], axesA, a->size, axesB, b->size, relPos, 0, &penetration, &normal, &minAxisIndex)) return (CollisionManifold_t) { 0 };
+    if(!TestSATAxis(axesA[1], axesA, a->size, axesB, b->size, relPos, 1, &penetration, &normal, &minAxisIndex)) return (CollisionManifold_t) { 0 };
+    if(!TestSATAxis(axesA[2], axesA, a->size, axesB, b->size, relPos, 2, &penetration, &normal, &minAxisIndex)) return (CollisionManifold_t) { 0 };
+    if(!TestSATAxis(axesB[0], axesA, a->size, axesB, b->size, relPos, 3, &penetration, &normal, &minAxisIndex)) return (CollisionManifold_t) { 0 };
+    if(!TestSATAxis(axesB[1], axesA, a->size, axesB, b->size, relPos, 4, &penetration, &normal, &minAxisIndex)) return (CollisionManifold_t) { 0 };
+    if(!TestSATAxis(axesB[2], axesA, a->size, axesB, b->size, relPos, 5, &penetration, &normal, &minAxisIndex)) return (CollisionManifold_t) { 0 };
+
+	if(!TestCrossSATAxis(axesA[0], axesB[0], axesA, a->size, axesB, b->size, relPos, 6, &penetration, &normal, &minAxisIndex)) return (CollisionManifold_t) { 0 };
+    if(!TestCrossSATAxis(axesA[0], axesB[1], axesA, a->size, axesB, b->size, relPos, 7, &penetration, &normal, &minAxisIndex)) return (CollisionManifold_t) { 0 };
+    if(!TestCrossSATAxis(axesA[0], axesB[2], axesA, a->size, axesB, b->size, relPos, 8, &penetration, &normal, &minAxisIndex)) return (CollisionManifold_t) { 0 };
+    if(!TestCrossSATAxis(axesA[1], axesB[0], axesA, a->size, axesB, b->size, relPos, 9, &penetration, &normal, &minAxisIndex)) return (CollisionManifold_t) { 0 };
+    if(!TestCrossSATAxis(axesA[1], axesB[1], axesA, a->size, axesB, b->size, relPos, 10, &penetration, &normal, &minAxisIndex)) return (CollisionManifold_t) { 0 };
+    if(!TestCrossSATAxis(axesA[1], axesB[2], axesA, a->size, axesB, b->size, relPos, 11, &penetration, &normal, &minAxisIndex)) return (CollisionManifold_t) { 0 };
+    if(!TestCrossSATAxis(axesA[2], axesB[0], axesA, a->size, axesB, b->size, relPos, 12, &penetration, &normal, &minAxisIndex)) return (CollisionManifold_t) { 0 };
+    if(!TestCrossSATAxis(axesA[2], axesB[1], axesA, a->size, axesB, b->size, relPos, 13, &penetration, &normal, &minAxisIndex)) return (CollisionManifold_t) { 0 };
+    if(!TestCrossSATAxis(axesA[2], axesB[2], axesA, a->size, axesB, b->size, relPos, 14, &penetration, &normal, &minAxisIndex)) return (CollisionManifold_t) { 0 };
+
+	// No separating axis found
+
+	// Ensure the collision normal points from A to B
+    if(Vec3_Dot(normal, relPos)<0.0f)
+        normal=Vec3_Muls(normal, -1.0f);
+
+	Vec3_Normalize(&normal);
+
+    // Edge to edge contact
+    if(minAxisIndex>=6)
+    {
+        const vec3 pA=Vec3_Addv(
+			Vec3_Addv(
+				Vec3_Addv(a->position,
+					Vec3_Muls(axesA[0], (Vec3_Dot(normal, axesA[0])>=0.0f)?a->size.x:-a->size.x)),
+					Vec3_Muls(axesA[1], (Vec3_Dot(normal, axesA[1])>=0.0f)?a->size.y:-a->size.y)),
+					Vec3_Muls(axesA[2], (Vec3_Dot(normal, axesA[2])>=0.0f)?a->size.z:-a->size.z)
+		);
+        const vec3 pB=Vec3_Addv(
+			Vec3_Addv(
+				Vec3_Addv(b->position,
+					Vec3_Muls(axesB[0], (Vec3_Dot(normal, axesB[0])<=0.0f)?b->size.x:-b->size.x)),
+					Vec3_Muls(axesB[1], (Vec3_Dot(normal, axesB[1])<=0.0f)?b->size.y:-b->size.y)),
+					Vec3_Muls(axesB[2], (Vec3_Dot(normal, axesB[2])<=0.0f)?b->size.z:-b->size.z)
+		);
+
+        CollisionManifold_t manifold;
+        manifold.a=a;
+        manifold.b=b;
+        manifold.contacts[0].position=Vec3_Muls(Vec3_Addv(pA, pB), 0.5f);
+        manifold.contacts[0].normal=normal;
+        manifold.contacts[0].penetration=penetration;
+        manifold.contactCount=1;
+
+		return manifold;
+    }
+
+    // Face contact
+    const bool refIsA=(minAxisIndex<3);
+    const RigidBody_t *ref=refIsA?a:b;
+    const RigidBody_t *inc=refIsA?b:a;
+    const vec3 *refAxes=refIsA?axesA:axesB;
+    const vec3 *incAxes=refIsA?axesB:axesA;
+
+    const uint32_t refFaceAxis=refIsA?minAxisIndex:minAxisIndex-3;
+    const vec3 refFaceNormal=refIsA?normal:Vec3_Muls(normal, -1.0f);
+
+	uint32_t incFaceAxis=0;
+	float incFaceSign=1.0f;
+
+	const float di0=Vec3_Dot(incAxes[0], refFaceNormal), adi0=fabsf(di0);
+	const float di1=Vec3_Dot(incAxes[1], refFaceNormal), adi1=fabsf(di1);
+	const float di2=Vec3_Dot(incAxes[2], refFaceNormal), adi2=fabsf(di2);
+
+	if(adi0>=adi1&&adi0>=adi2)
+	{
+		incFaceAxis=0;
+		incFaceSign=di0<=0.0f?1.0f:-1.0f;
+	}
+	else if(adi1>=adi2)
+	{
+		incFaceAxis=1;
+		incFaceSign=di1<=0.0f?1.0f:-1.0f;
+	}
+	else
+	{
+		incFaceAxis=2;
+		incFaceSign=di2<=0.0f?1.0f:-1.0f;
+	}
+
+    // Build the corners of the face
+	const vec3 incFaceCenter=Vec3_Addv(inc->position, Vec3_Muls(incAxes[incFaceAxis], incFaceSign*inc->size.v[incFaceAxis]));
+
+	const uint32_t it1=(incFaceAxis+1)%3;
+    const uint32_t it2=(incFaceAxis+2)%3;
+    const vec3 ie1=Vec3_Muls(incAxes[it1], inc->size.v[it1]);
+    const vec3 ie2=Vec3_Muls(incAxes[it2], inc->size.v[it2]);
+
+    vec3 buf0[MAX_CLIP_VERTS], buf1[MAX_CLIP_VERTS];
+    buf0[0]=Vec3_Addv(Vec3_Addv(incFaceCenter, ie1), ie2);
+    buf0[1]=Vec3_Addv(Vec3_Subv(incFaceCenter, ie1), ie2);
+    buf0[2]=Vec3_Subv(Vec3_Subv(incFaceCenter, ie1), ie2);
+    buf0[3]=Vec3_Subv(Vec3_Addv(incFaceCenter, ie1), ie2);
+    uint32_t count=4;
+
+    const uint32_t rt1=(refFaceAxis+1)%3;
+    const uint32_t rt2=(refFaceAxis+2)%3;
+    const float rs1=ref->size.v[rt1];
+    const float rs2=ref->size.v[rt2];
+
+    const float refDotRt1=Vec3_Dot(ref->position, refAxes[rt1]);
+    const float refDotRt2=Vec3_Dot(ref->position, refAxes[rt2]);
+    const float refFaceDist=Vec3_Dot(ref->position, refFaceNormal)+ref->size.v[refFaceAxis];
+
+    count=ClipPolygon(buf0, count, buf1, MAX_CLIP_VERTS, refAxes[rt1], refDotRt1+rs1);
+	if(!count) return (CollisionManifold_t) { 0 };
+    count=ClipPolygon(buf1, count, buf0, MAX_CLIP_VERTS, Vec3_Muls(refAxes[rt1], -1.0f), -refDotRt1+rs1);
+	if(!count) return (CollisionManifold_t) { 0 };
+    count=ClipPolygon(buf0, count, buf1, MAX_CLIP_VERTS, refAxes[rt2], refDotRt2+rs2);
+    if(!count) return (CollisionManifold_t) { 0 };
+    count=ClipPolygon(buf1, count, buf0, MAX_CLIP_VERTS, Vec3_Muls(refAxes[rt2], -1.0f), -refDotRt2+rs2);
+    if(!count) return (CollisionManifold_t) { 0 };
+    count=ClipPolygon(buf0, count, buf1, MAX_CLIP_VERTS, refFaceNormal, refFaceDist);
+    if(!count) return (CollisionManifold_t) { 0 };
+
+    CollisionManifold_t manifold;
+    manifold.a=a;
+    manifold.b=b;
+    manifold.contactCount=0;
+
+    for(uint32_t i=0;i<count&&manifold.contactCount<MAX_CONTACTS_PER_MANIFOLD;i++)
+    {
+		manifold.contacts[manifold.contactCount].position=buf1[i];
+        manifold.contacts[manifold.contactCount].normal=normal;
+        manifold.contacts[manifold.contactCount].penetration=fmaxf(refFaceDist-Vec3_Dot(buf1[i], refFaceNormal), 0.0f);
+        manifold.contactCount++;
+    }
+
+	ReduceManifoldContacts(&manifold);
+
+	return manifold;
+}
+
+static CollisionManifold_t CapsuleToSphereCollision(RigidBody_t *capsule, RigidBody_t *sphere)
+{
+	// Capsule endpoints
+	vec3 axes[3];
+	QuatAxes(capsule->orientation, axes);
+
+	vec3 offset=Vec3_Muls(axes[1], capsule->size.y);
+
+	vec3 a=Vec3_Subv(capsule->position, offset);
+	vec3 b=Vec3_Addv(capsule->position, offset);
+
+	// Closest point on capsule segment to sphere center
+	vec3 slope=Vec3_Subv(b, a);
+	float slopeLen=Vec3_Dot(slope, slope);
+	vec3 closest=Vec3_Addv(a, Vec3_Muls(slope, clampf(Vec3_Dot(Vec3_Subv(sphere->position, a), slope)/slopeLen, 0.0, 1.0)));
+
+	vec3 delta=Vec3_Subv(sphere->position, closest);
+
+	float distSq=Vec3_LengthSq(delta);
+	float r=capsule->radius+sphere->radius;
+
+	if(distSq>r*r)
+		return (CollisionManifold_t) { 0 };
+
+	float dist=fmaxf(sqrtf(distSq), FLT_EPSILON); // Avoid zero for degenerate case
+	float penetration=r-dist;
+
+	vec3 normal=distSq < FLT_EPSILON ? Vec3(0.0f, 1.0f, 0.0f) : Vec3_Muls(delta, 1.0f/dist); // Fallback to world up if coincident
+	vec3 contact=Vec3_Subv(sphere->position, Vec3_Muls(normal, sphere->radius-penetration*0.5f));
+
+	CollisionManifold_t manifold;
+	manifold.a=capsule;
+	manifold.b=sphere;
+	manifold.contacts[0].position=contact;
+	manifold.contacts[0].normal=normal;
+	manifold.contacts[0].penetration=penetration;
+	manifold.contactCount=1;
+
+	return manifold;
+}
+
+static CollisionManifold_t CapsuleToCapsuleCollision(RigidBody_t *a, RigidBody_t *b)
+{
+	vec3 axes[3], offset;
+
+	// Capsule A endpoints
+	QuatAxes(a->orientation, axes);
+	offset=Vec3_Muls(axes[1], a->size.y);
+	vec3 a0=Vec3_Subv(a->position, offset);
+	vec3 a1=Vec3_Addv(a->position, offset);
+
+	// Capsule B endpoints
+	QuatAxes(b->orientation, axes);
+	offset=Vec3_Muls(axes[1], b->size.y);
+	vec3 b0=Vec3_Subv(b->position, offset);
+	vec3 b1=Vec3_Addv(b->position, offset);
+
+	// Closest points between segments
+	vec3 d1=Vec3_Subv(a1, a0);
+	vec3 d2=Vec3_Subv(b1, b0);
+	vec3 r=Vec3_Subv(a0, b0);
+
+	float aDot=Vec3_Dot(d1, d1);
+	float eDot=Vec3_Dot(d2, d2);
+	float fDot=Vec3_Dot(d2, r);
+
+	float s, t;
+	if(aDot<=FLT_EPSILON&&eDot<=FLT_EPSILON)
+	{
+		s=0.0f;
+		t=0.0f;
+	}
+	else if(aDot <= FLT_EPSILON)
+	{
+		s=0.0f;
+		t=clampf(fDot/eDot, 0.0f, 1.0f);
+	}
+	else
+	{
+		float cDot=Vec3_Dot(d1, r);
+
+		if(eDot<=FLT_EPSILON)
+		{
+			t=0.0f;
+			s=clampf(-cDot/aDot, 0.0f, 1.0f);
+		}
+		else
+		{
+			float bDot=Vec3_Dot(d1, d2);
+			float denom=aDot*eDot-bDot*bDot;
+
+			if(fabsf(denom)>FLT_EPSILON)
+				s=clampf((bDot*fDot-cDot*eDot)/denom, 0.0f, 1.0f);
+			else
+				s=0.0f;
+
+			t=(bDot*s+fDot)/eDot;
+			t=clampf(t, 0.0f, 1.0f);
+		}
+	}
+
+	vec3 pA=Vec3_Addv(a0, Vec3_Muls(d1, s));
+	vec3 pB=Vec3_Addv(b0, Vec3_Muls(d2, t));
+
+	vec3 delta=Vec3_Subv(pB, pA);
+	float distSq=Vec3_LengthSq(delta);
+
+	float rSum=a->radius+b->radius;
+
+	if(distSq>rSum*rSum)
+		return (CollisionManifold_t) { 0 };
+
+	float dist=fmaxf(sqrtf(distSq), FLT_EPSILON); // Avoid zero for degenerate case
+	float penetration=rSum-dist;
+
+	vec3 normal=distSq < FLT_EPSILON ? Vec3(0.0f, 1.0f, 0.0f) : Vec3_Muls(delta, 1.0f/dist); // Fallback to world up if coincident
+	vec3 contact=Vec3_Muls(Vec3_Addv(pA, pB), 0.5f);
+
+	CollisionManifold_t manifold;
+	manifold.a=a;
+	manifold.b=b;
+	manifold.contacts[0].position=contact;
+	manifold.contacts[0].normal=normal;
+	manifold.contacts[0].penetration=penetration;
+	manifold.contactCount=1;
+
+	return manifold;
+}
+
+static CollisionManifold_t CapsuleToOBBCollision(RigidBody_t *capsule, RigidBody_t *obb)
+{
+	// Capsule endpoints
+	vec3 capAxes[3];
+	QuatAxes(capsule->orientation, capAxes);
+
+	vec3 offset=Vec3_Muls(capAxes[1], capsule->size.y);
+
+	vec3 capA=Vec3_Subv(capsule->position, offset);
+	vec3 capB=Vec3_Addv(capsule->position, offset);
+
+	// OBB axes
+	vec3 axes[3];
+	QuatAxes(obb->orientation, axes);
+
+	// Transform capsule endpoints into OBB local space
+	vec3 relA=Vec3_Subv(capA, obb->position);
+	vec3 aLocal=Vec3(
+		Vec3_Dot(relA, axes[0]),
+		Vec3_Dot(relA, axes[1]),
+		Vec3_Dot(relA, axes[2])
+	);
+
+	vec3 relB=Vec3_Subv(capB, obb->position);
+	vec3 bLocal=Vec3(
+		Vec3_Dot(relB, axes[0]),
+		Vec3_Dot(relB, axes[1]),
+		Vec3_Dot(relB, axes[2])
+	);
+
+	vec3 dLocal=Vec3_Subv(bLocal, aLocal);
+
+	// Perform ternary search along capsule segment in OBB local space
+	float lo=0.0f, hi=1.0f;
+	float bestT=0.0f;
+	float bestDistSq=FLT_MAX;
+
+	for(int i=0;i<20;i++)
+	{
+		float t1=lo+(hi-lo)*(1.0f/3.0f);
+		float t2=hi-(hi-lo)*(1.0f/3.0f);
+
+		// Closest point on OBB to capsule point at t1 and t2
+		vec3 p1=Vec3_Addv(aLocal, Vec3_Muls(dLocal, t1));
+		vec3 c1=Vec3(
+			clampf(p1.x, -obb->size.x, obb->size.x),
+			clampf(p1.y, -obb->size.y, obb->size.y),
+			clampf(p1.z, -obb->size.z, obb->size.z)
+		);
+		float d1=Vec3_LengthSq(Vec3_Subv(p1, c1));
+
+		vec3 p2=Vec3_Addv(aLocal, Vec3_Muls(dLocal, t2));
+		vec3 c2=Vec3(
+			clampf(p2.x, -obb->size.x, obb->size.x),
+			clampf(p2.y, -obb->size.y, obb->size.y),
+			clampf(p2.z, -obb->size.z, obb->size.z)
+		);
+		float d2=Vec3_LengthSq(Vec3_Subv(p2, c2));
+
+		if(d1<d2)
+		{
+			hi=t2;
+
+			if(d1<bestDistSq)
+			{
+				bestDistSq=d1;
+				bestT=t1;
+			}
+		}
+		else
+		{
+			lo=t1;
+
+			if(d2<bestDistSq)
+			{
+				bestDistSq=d2;
+				bestT=t2;
+			}
+		}
+	}
+
+	// Final closest points
+	vec3 pLocal=Vec3_Addv(aLocal, Vec3_Muls(dLocal, bestT));
+	vec3 closestLocal=Vec3(
+		clampf(pLocal.x, -obb->size.x, obb->size.x),
+		clampf(pLocal.y, -obb->size.y, obb->size.y),
+		clampf(pLocal.z, -obb->size.z, obb->size.z)
+	);
+	float distSq=Vec3_LengthSq(Vec3_Subv(pLocal, closestLocal));
+
+	if(distSq>capsule->radius*capsule->radius||distSq<FLT_EPSILON)
+		return (CollisionManifold_t) { 0 };
+
+	float dist=sqrtf(distSq);
+	float penetration=capsule->radius-dist;
+
+	// Convert closest point on OBB back to world space
+	vec3 closestWorld=obb->position;
+	closestWorld=Vec3_Addv(closestWorld, Vec3_Muls(axes[0], closestLocal.x));
+	closestWorld=Vec3_Addv(closestWorld, Vec3_Muls(axes[1], closestLocal.y));
+	closestWorld=Vec3_Addv(closestWorld, Vec3_Muls(axes[2], closestLocal.z));
+
+	// Closest point on capsule axis in world space
+	vec3 pSegWorld=Vec3_Addv(capA, Vec3_Muls(Vec3_Subv(capB, capA), bestT));
+
+	vec3 delta=Vec3_Subv(pSegWorld, closestWorld);
+	vec3 normal=Vec3_Muls(delta, 1.0f/dist);
+
+	vec3 contact=Vec3_Subv(pSegWorld, Vec3_Muls(normal, capsule->radius-penetration*0.5f));
+
+	CollisionManifold_t manifold;
+	manifold.a=obb;
+	manifold.b=capsule;
+	manifold.contacts[0].position=contact;
+	manifold.contacts[0].normal=normal;
+	manifold.contacts[0].penetration=penetration;
+	manifold.contactCount=1;
+
+	return manifold;
+}
+
+CollisionManifold_t PhysicsCollision(RigidBody_t *a, RigidBody_t *b)
+{
+	if(a->type==RIGIDBODY_SPHERE&&b->type==RIGIDBODY_SPHERE)
+		return SphereToSphereCollision(a, b);
+	else if(a->type==RIGIDBODY_SPHERE&&b->type==RIGIDBODY_OBB)
+		return SphereToOBBCollision(a, b);
+	else if(a->type==RIGIDBODY_OBB&&b->type==RIGIDBODY_SPHERE)
+		return SphereToOBBCollision(b, a);
+	else if(a->type==RIGIDBODY_OBB&&b->type==RIGIDBODY_OBB)
+		return OBBToOBBCollision(a, b);
+	else if(a->type==RIGIDBODY_CAPSULE&&b->type==RIGIDBODY_SPHERE)
+		return CapsuleToSphereCollision(a, b);
+	else if(a->type==RIGIDBODY_SPHERE&&b->type==RIGIDBODY_CAPSULE)
+		return CapsuleToSphereCollision(b, a);
+	else if(a->type==RIGIDBODY_CAPSULE&&b->type==RIGIDBODY_CAPSULE)
+		return CapsuleToCapsuleCollision(a, b);
+	else if(a->type==RIGIDBODY_CAPSULE&&b->type==RIGIDBODY_OBB)
+		return CapsuleToOBBCollision(a, b);
+	else if(a->type==RIGIDBODY_OBB&&b->type==RIGIDBODY_CAPSULE)
+		return CapsuleToOBBCollision(b, a);
+
+	return (CollisionManifold_t) { 0 };
+}
+
+void SpringIntegrate(Spring_t *s, vec3 target, float dt)
+{
+	vec3 displacement=Vec3_Subv(s->position, target);
+	const float length=Vec3_Normalize(&displacement);
+
+	const float stretch=length-s->length;
+	const vec3 force=Vec3_Muls(displacement, -s->stiffness*stretch);
+	const vec3 dampingForce=Vec3_Muls(s->velocity, -s->damping);
+
+	vec3 acceleration=Vec3_Muls(Vec3_Addv(force, dampingForce), s->invMass);
+
+	s->velocity=Vec3_Addv(s->velocity, Vec3_Muls(acceleration, dt));
+	s->position=Vec3_Addv(s->position, Vec3_Muls(s->velocity, dt));
 }

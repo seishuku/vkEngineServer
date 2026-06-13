@@ -2,6 +2,7 @@
 #define __MATH_H__
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <math.h>
 
 #ifdef WIN32
@@ -18,10 +19,20 @@ inline static const int32_t max(const int32_t a, const int32_t b) { return (a>b)
 
 inline static float clampf(const float value, const float min, const float max) { return fminf(fmaxf(value, min), max); }
 
-typedef struct { float x, y; } vec2;
-typedef struct { float x, y, z; } vec3;
-typedef struct { float x, y, z, w; } vec4;
-typedef struct { vec4 x, y, z, w; } matrix;
+typedef union { struct { float x, y; }; float v[2]; } vec2;
+typedef union { struct { float x, y, z; }; float v[3]; } vec3;
+typedef union { struct { float x, y, z, w; }; float v[4]; } vec4;
+typedef union { struct { vec4 x, y, z, w; }; float m[16]; } matrix;
+typedef struct { vec3 min, max; } aabb;
+
+#define FRUSTUM_LEFT	0
+#define FRUSTUM_RIGHT	1
+#define FRUSTUM_BOTTOM	2
+#define FRUSTUM_TOP		3
+#define FRUSTUM_NEAR	4
+#define FRUSTUM_FAR		5
+
+typedef struct { vec4 planes[6]; } frustum;
 
 #define VEC_INLINE
 
@@ -32,8 +43,8 @@ typedef struct { vec4 x, y, z, w; } matrix;
 // VecX_Xs - Broadcast wise type op (b math op on vector)
 
 #ifdef VEC_INLINE
-inline static const vec2 Vec2(const float x, const float y) { return (vec2) { .x=x, .y=y }; }
-inline static const vec2 Vec2b(const float b) { return (vec2) { .x=b, .y=b }; }
+inline static const vec2 Vec2(const float x, const float y) { return (const vec2) { .x=x, .y=y }; }
+inline static const vec2 Vec2b(const float b) { return (const vec2) { .x=b, .y=b }; }
 inline static vec2 Vec2_Add(const vec2 a, const float x, const float y) { return (vec2) { .x=a.x+x, .y=a.y+y }; }
 inline static vec2 Vec2_Addv(const vec2 a, const vec2 b) { return (vec2) { .x=a.x+b.x, .y=a.y+b.y }; }
 inline static vec2 Vec2_Adds(const vec2 a, const float b) { return (vec2) { .x=a.x+b, .y=a.y+b }; }
@@ -45,6 +56,7 @@ inline static vec2 Vec2_Mulv(const vec2 a, const vec2 b) { return (vec2) { .x=a.
 inline static vec2 Vec2_Muls(const vec2 a, const float b) { return (vec2) { .x=a.x*b, .y=a.y*b }; }
 inline static float Vec2_Dot(const vec2 a, const vec2 b) { return a.x*b.x+a.y*b.y; }
 inline static float Vec2_Length(const vec2 v) { return sqrtf(Vec2_Dot(v, v)); }
+inline static float Vec2_LengthSq(const vec2 v) { return Vec2_Dot(v, v); }
 inline static float Vec2_Distance(const vec2 v0, const vec2 v1) { return Vec2_Length(Vec2_Subv(v1, v0)); }
 inline static float Vec2_DistanceSq(const vec2 v0, const vec2 v1) { return (v0.x-v1.x)*(v0.x-v1.x)+(v0.y-v1.y)*(v0.y-v1.y); }
 inline static vec2 Vec2_Reflect(const vec2 N, const vec2 I) { return Vec2_Subv(I, Vec2_Muls(N, 2.0f*Vec2_Dot(N, I))); }
@@ -65,6 +77,7 @@ vec2 Vec2_Mulv(const vec2 a, const vec2 b);
 vec2 Vec2_Muls(const vec2 a, const float b);
 float Vec2_Dot(const vec2 a, const vec2 b);
 float Vec2_Length(const vec2 v);
+float Vec2_LengthSq(const vec2 v);
 float Vec2_Distance(const vec2 v0, const vec2 v1);
 float Vec2_DistanceSq(const vec2 v0, const vec2 v1);
 vec2 Vec2_Reflect(const vec2 N, const vec2 I);
@@ -76,9 +89,9 @@ vec2 Vec2_Clampv(const vec2 v, const vec2 min, const vec2 max);
 float Vec2_Normalize(vec2 *v);
 
 #ifdef VEC_INLINE
-inline static const vec3 Vec3(const float x, const float y, const float z) { return (vec3) { .x=x, .y=y, .z=z }; }
-inline static const vec3 Vec3_Vec2(const vec2 a, const float z) { return (vec3) { .x=a.x, .y=a.y, .z=z }; }
-inline static const vec3 Vec3b(const float b) { return (vec3) { .x=b, .y=b, .z=b }; }
+inline static const vec3 Vec3(const float x, const float y, const float z) { return (const vec3) { .x=x, .y=y, .z=z }; }
+inline static const vec3 Vec3_Vec2(const vec2 a, const float z) { return (const vec3) { .x=a.x, .y=a.y, .z=z }; }
+inline static const vec3 Vec3b(const float b) { return (const vec3) { .x=b, .y=b, .z=b }; }
 inline static vec3 Vec3_Add(const vec3 a, const float x, const float y, const float z) { return (vec3) { .x=a.x+x, .y=a.y+y, .z=a.z+z }; }
 inline static vec3 Vec3_Addv(const vec3 a, const vec3 b) { return (vec3) { .x=a.x+b.x, .y=a.y+b.y, .z=a.z+b.z }; }
 inline static vec3 Vec3_Adds(const vec3 a, const float b) { return (vec3) { .x=a.x+b, .y=a.y+b, .z=a.z+b }; }
@@ -90,6 +103,7 @@ inline static vec3 Vec3_Mulv(const vec3 a, const vec3 b) { return (vec3) { .x=a.
 inline static vec3 Vec3_Muls(const vec3 a, const float b) { return (vec3) { .x=a.x*b, .y=a.y*b, .z=a.z*b }; }
 inline static float Vec3_Dot(const vec3 a, const vec3 b) { return a.x*b.x+a.y*b.y+a.z*b.z; }
 inline static float Vec3_Length(const vec3 v) { return sqrtf(Vec3_Dot(v, v)); }
+inline static float Vec3_LengthSq(const vec3 v) { return Vec3_Dot(v, v); }
 inline static float Vec3_Distance(const vec3 v0, const vec3 v1) { return Vec3_Length(Vec3_Subv(v1, v0)); }
 inline static float Vec3_DistanceSq(const vec3 v0, const vec3 v1) { return (v0.x-v1.x)*(v0.x-v1.x)+(v0.y-v1.y)*(v0.y-v1.y)+(v0.z-v1.z)*(v0.z-v1.z); }
 inline static float Vec3_GetAngle(const vec3 v0, const vec3 v1) { return acosf(Vec3_Dot(v0, v1)/(Vec3_Length(v0)*Vec3_Length(v1))); }
@@ -112,6 +126,7 @@ vec3 Vec3_Mulv(const vec3 a, const vec3 b);
 vec3 Vec3_Muls(const vec3 a, const float b);
 float Vec3_Dot(const vec3 a, const vec3 b);
 float Vec3_Length(const vec3 v);
+float Vec3_LengthSq(const vec3 v);
 float Vec3_Distance(const vec3 v0, const vec3 v1);
 float Vec3_DistanceSq(const vec3 v0, const vec3 v1);
 float Vec3_GetAngle(const vec3 v0, const vec3 v1);
@@ -125,9 +140,9 @@ vec3 Vec3_Clampv(const vec3 v, const vec3 min, const vec3 max);
 float Vec3_Normalize(vec3 *v);
 
 #ifdef VEC_INLINE
-inline static const vec4 Vec4(const float x, const float y, const float z, const float w) { return (vec4) { .x=x, .y=y, .z=z, .w=w }; }
-inline static const vec4 Vec4_Vec3(const vec3 a, const float w) { return (vec4) { .x=a.x, .y=a.y, .z=a.z, .w=w }; }
-inline static const vec4 Vec4_Vec2(const vec2 a, const float z, const float w) { return (vec4) { .x=a.x, .y=a.y, .z=z, .w=w }; }
+inline static const vec4 Vec4(const float x, const float y, const float z, const float w) { return (const vec4) { .x=x, .y=y, .z=z, .w=w }; }
+inline static const vec4 Vec4_Vec3(const vec3 a, const float w) { return (const vec4) { .x=a.x, .y=a.y, .z=a.z, .w=w }; }
+inline static const vec4 Vec4_Vec2(const vec2 a, const float z, const float w) { return (const vec4) { .x=a.x, .y=a.y, .z=z, .w=w }; }
 inline static const vec4 Vec4b(const float b) { return (vec4) { .x=b, .y=b, .z=b, .w=b }; }
 inline static vec4 Vec4_Add(const vec4 a, const float x, const float y, const float z, const float w) { return (vec4) { .x=a.x+x, .y=a.y+y, .z=a.z+z, .w=a.w+w }; }
 inline static vec4 Vec4_Addv(const vec4 a, const vec4 b) { return (vec4) { .x=a.x+b.x, .y=a.y+b.y, .z=a.z+b.z, .w=a.w+b.w }; }
@@ -140,6 +155,7 @@ inline static vec4 Vec4_Mulv(const vec4 a, const vec4 b) { return (vec4) { .x=a.
 inline static vec4 Vec4_Muls(const vec4 a, const float b) { return (vec4) { .x=a.x*b, .y=a.y*b, .z=a.z*b, .w=a.w*b }; }
 inline static float Vec4_Dot(const vec4 a, const vec4 b) { return a.x*b.x+a.y*b.y+a.z*b.z+a.w*b.w; }
 inline static float Vec4_Length(const vec4 v) { return sqrtf(Vec4_Dot(v, v)); }
+inline static float Vec4_LengthSq(const vec4 v) { return Vec4_Dot(v, v); }
 inline static float Vec4_Distance(const vec4 v0, const vec4 v1) { return Vec4_Length(Vec4_Subv(v1, v0)); }
 inline static float Vec4_DistanceSq(const vec4 v0, const vec4 v1) { return (v0.x-v1.x)*(v0.x-v1.x)+(v0.y-v1.y)*(v0.y-v1.y)+(v0.z-v1.z)*(v0.z-v1.z)+(v0.w-v1.w)*(v0.w-v1.w); }
 inline static vec4 Vec4_Reflect(const vec4 N, const vec4 I) { return Vec4_Subv(I, Vec4_Muls(N, 2.0f*Vec4_Dot(N, I))); }
@@ -162,6 +178,7 @@ vec4 Vec4_Mulv(const vec4 a, const vec4 b);
 vec4 Vec4_Muls(const vec4 a, const float b);
 float Vec4_Dot(const vec4 a, const vec4 b);
 float Vec4_Length(const vec4 v);
+float Vec4_LengthSq(const vec4 v);
 float Vec4_Distance(const vec4 v0, const vec4 v1);
 float Vec4_DistanceSq(const vec4 v0, const vec4 v1);
 vec4 Vec4_Reflect(const vec4 N, const vec4 I);
@@ -171,6 +188,9 @@ vec4 Vec4_Clampv(const vec4 v, const vec4 min, const vec4 max);
 #endif
 
 float Vec4_Normalize(vec4 *v);
+
+bool Frustum_TestAABB(const frustum frustum, const aabb bounds);
+frustum Frustum_ExtractPlanes(const matrix m);
 
 float fsinf(const float v);
 float fcosf(const float v);
@@ -190,6 +210,7 @@ inline static float rad2deg(const float x)
 float fact(const int32_t n);
 
 void RandomSeed(uint32_t seed);
+uint32_t GetRandomSeed(void);
 uint32_t Random(void);
 int32_t RandRange(int32_t min, int32_t max);
 float RandFloat(void);
@@ -198,7 +219,14 @@ uint32_t IsPower2(uint32_t value);
 uint32_t NextPower2(uint32_t value);
 int32_t ComputeLog(uint32_t value);
 float Lerp(const float a, const float b, const float t);
-float raySphereIntersect(vec3 rayOrigin, vec3 rayDirection, vec3 sphereCenter, float sphereRadius);
+
+float RayOBBIntersect(const vec3 origin, const vec3 direction, const vec3 center, const vec3 halfSize, const vec4 orientation);
+float RaySphereIntersect(const vec3 origin, const vec3 direction, const vec3 center, const float radius);
+float RayCapsuleIntersect(const vec3 origin, const vec3 direction, const vec3 center, const float radius, const float halfHeight, const vec4 orientation);
+
+uint32_t planeSphereIntersect(const vec4 plane, const vec3 center, const float radius, vec3 *intersectionA, vec3 *intersectionB);
+
+vec3 ClosestPointOnTriangle(vec3 p, vec3 a, vec3 b, vec3 c);
 
 vec4 QuatAngle(const float angle, const float x, const float y, const float z);
 vec4 QuatAnglev(const float angle, const vec3 v);
@@ -207,6 +235,7 @@ vec4 QuatMultiply(const vec4 a, const vec4 b);
 vec4 QuatInverse(const vec4 q);
 vec3 QuatRotate(const vec4 q, const vec3 v);
 vec4 QuatSlerp(const vec4 qa, const vec4 qb, const float t);
+void QuatAxes(vec4 q, vec3 *axes);
 matrix QuatToMatrix(const vec4 in);
 vec4 MatrixToQuat(const matrix m);
 

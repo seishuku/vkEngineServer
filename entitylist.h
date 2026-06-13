@@ -1,0 +1,97 @@
+#ifndef __ENTITYLIST_H__
+#define __ENTITYLIST_H__
+
+#include <stdbool.h>
+#include <stdint.h>
+#include <threads.h>
+#include "math/math.h"
+#include "physics/physics.h"
+#if 0
+#include "vulkan/vulkan.h"
+#endif
+#include "utils/id.h"
+
+#define MAX_ENTITY 50000
+
+typedef matrix (*EntityTransformFunc)(const RigidBody_t *body);
+
+typedef enum
+{
+	ENTITYOBJECTTYPE_PLAYER,
+	ENTITYOBJECTTYPE_FIELD,
+	ENTITYOBJECTTYPE_PROJECTILE,
+} EntityObjectType_e;
+
+typedef struct
+{
+	uint32_t ID;
+
+	aabb bounds;
+	RigidBody_t *body;
+	EntityObjectType_e objectType;
+
+	bool noRender;
+	uint32_t modelID, textureIDs[2];
+
+	EntityTransformFunc transformFunc;
+
+	bool remove;
+} Entity_t;
+
+typedef struct
+{
+	bool noRender;
+	uint32_t modelID;
+	uint32_t textureIDs[2];
+	uint32_t instanceOffset;
+	uint32_t instanceCount;
+} EntityBatch_t;
+
+typedef struct
+{
+	Entity_t entities[MAX_ENTITY];
+	uint32_t entityCount;
+
+	uint32_t sortedIndices[MAX_ENTITY];
+	uint32_t sortedCount;
+
+	uint32_t culledIndices[MAX_ENTITY];
+	uint32_t culledCount;
+
+	EntityBatch_t *batches;
+	uint32_t batchCount;
+	uint32_t batchCapacity;
+
+	EntityBatch_t *culledBatches;
+	uint32_t culledBatchCount;
+	uint32_t culledBatchCapacity;
+
+	ID_t IDPool;
+
+	bool dirty;
+
+#if 0
+	struct
+	{
+		VkuBuffer_t instanceBuffer;
+		matrix *instancePtr;
+
+		VkuBuffer_t culledInstanceBuffer;
+		matrix *culledInstancePtr;
+	} perFrame[VKU_MAX_FRAME_COUNT];
+#endif
+} EntityList_t;
+
+bool EntityList_Init(EntityList_t *list);
+void EntityList_Destroy(EntityList_t *list);
+
+uint32_t EntityList_Add(EntityList_t *list, RigidBody_t *body, bool noRender, uint32_t modelID, uint32_t tex0, uint32_t tex1, EntityObjectType_e objectType, EntityTransformFunc transformFunc);
+bool EntityList_Remove(EntityList_t *list, uint32_t ID);
+void EntityList_Clear(EntityList_t *list);
+
+void EntityList_RecalculateBounds(EntityList_t *list);
+void EntityList_Rebuild(EntityList_t *list);
+void EntityList_UpdateInstances(EntityList_t *list, uint32_t frameIndex);
+void EntityList_FrustumCull(EntityList_t *list, const frustum frustum);
+
+#endif

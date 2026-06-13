@@ -2,7 +2,7 @@
 #include "../system/system.h"
 
 #ifdef WIN32
-#include <winsock2.h>
+#include <winsock.h>
 #else
 #include <sys/socket.h>
 #include <sys/unistd.h>
@@ -90,6 +90,9 @@ bool Network_SocketBind(Socket_t sock, uint32_t address, uint16_t port)
 	return true;
 }
 
+static uint64_t Network_BytesSent=0;
+static uint64_t Network_BytesReceived=0;
+
 bool Network_SocketSend(Socket_t sock, uint8_t *packet, uint32_t packet_size, uint32_t address, uint16_t port)
 {
 	struct sockaddr_in server_address;
@@ -103,6 +106,8 @@ bool Network_SocketSend(Socket_t sock, uint8_t *packet, uint32_t packet_size, ui
 		DBGPRINTF(DEBUG_ERROR, "Network_SocketSend() failed.\n");
 		return false;
 	}
+
+	Network_BytesSent+=packet_size;
 
 	return true;
 }
@@ -120,6 +125,9 @@ int32_t Network_SocketReceive(Socket_t sock, uint8_t *buffer, uint32_t buffer_si
 	*address=ntohl(from.sin_addr.s_addr);
 	*port=ntohs(from.sin_port);
 
+	if(bytes_received>=0)
+		Network_BytesReceived+=(uint64_t)bytes_received;
+
 	return bytes_received;
 }
 
@@ -134,4 +142,18 @@ bool Network_SocketClose(Socket_t sock)
 #endif
 
 	return true;
+}
+
+float Network_AvgBytesSent=0.0f;
+float Network_AvgBytesReceived=0.0f;
+
+void Network_ResetCounters(void)
+{
+    const float alpha=0.05f;
+
+    Network_AvgBytesSent=alpha*Network_BytesSent+(1.0f-alpha)*Network_AvgBytesSent;
+    Network_AvgBytesReceived=alpha*Network_BytesReceived+(1.0f-alpha)*Network_AvgBytesReceived;
+
+    Network_BytesSent=0;
+    Network_BytesReceived=0;
 }
