@@ -26,6 +26,17 @@ BVH_t           bvh;
 
 static Camera_t playerBodies[NET_MAX_CLIENTS];
 
+#define MAX_EMITTERS 1000
+ 
+typedef struct
+{
+    RigidBody_t body;
+    uint32_t entityID;
+    float life;
+} PhyParticleEmitter_t;
+ 
+static PhyParticleEmitter_t emitters[MAX_EMITTERS];
+ 
 #define MAX_MANIFOLDS 10000
 
 static struct
@@ -45,6 +56,46 @@ double GetClock(void)
         return ts.tv_sec+(double)ts.tv_nsec/1000000000.0;
 
     return 0.0;
+}
+
+uint32_t AddServerEmitter(vec3 position, vec3 velocity, float life)
+{
+    for(uint32_t i=0;i<MAX_EMITTERS;i++)
+    {
+        if(emitters[i].life>0.0f)
+            continue;
+ 
+        emitters[i].body.position=position;
+        emitters[i].body.velocity=velocity;
+        emitters[i].life=life;
+        emitters[i].entityID=EntityList_Add(&entityList, &emitters[i].body, true, 0, 0, 0, ENTITYOBJECTTYPE_PROJECTILE, NULL);
+ 
+        return emitters[i].entityID;
+    }
+ 
+    DBGPRINTF(DEBUG_WARNING, "AddServerEmitter: emitter pool full\n");
+    return NET_INVALID_ID;
+}
+ 
+static void RemoveServerEmitter(uint32_t index)
+{
+    if(index>=MAX_EMITTERS)
+        return;
+ 
+    if(emitters[index].entityID!=NET_INVALID_ID)
+    {
+        // Notify all clients to destroy this projectile
+        NetEvent_t ev={
+            .type=NETEVENT_DESTROY,
+            .destroy={ .id=emitters[index].entityID },
+        };
+        ServerNetwork_BroadcastEvent(&ev);
+ 
+        EntityList_Remove(&entityList, emitters[index].entityID);
+        emitters[index].entityID=NET_INVALID_ID;
+    }
+ 
+    emitters[index].life=0.0f;
 }
 
 uint32_t AddPlayer(uint32_t clientID)
@@ -97,8 +148,19 @@ static void TestCollision(Entity_t *objA, Entity_t *objB)
 
 static void PhysicsTick(float dt)
 {
-    for(uint32_t i=0;i<entityList.entityCount;i++)
-    {
+	for(uint32_t i=0;i<MAX_EMITTERS;i++)
+	{
+		if(emitters[i].entityID==NET_INVALID_ID)
+			continue;  // slot not in use
+
+		if(emitters[i].life>0.0f)
+			emitters[i].life-=dt;
+		else
+			RemoveServerEmitter(i);
+	}
+
+	for(uint32_t i=0;i<entityList.entityCount;i++)
+	{
         Entity_t *entity=&entityList.entities[i];
 
 		// TODO: Should this be done anyway, even though the client updates the physics for it's player?
@@ -110,6 +172,7 @@ static void PhysicsTick(float dt)
     memset(manifoldList, 0, sizeof(manifoldList));
     numManifolds=0;
 
+    EntityList_RecalculateBounds(&entityList);
     BVH_Build(&bvh, &entityList);
     BVH_Test(&bvh, &entityList, TestCollision);
 
@@ -125,7 +188,7 @@ static void PhysicsTick(float dt)
             float impactSpeed=PhysicsResolveCollision(manifold->a, manifold->b, manifold->contacts[j]);
 
             if(impactSpeed<2.0f)
-                continue;
+				continue;
 
             // Asteroid-asteroid: physics response only, no special handling
             if(objA->objectType==ENTITYOBJECTTYPE_FIELD&&objB->objectType==ENTITYOBJECTTYPE_FIELD)
@@ -140,38 +203,37 @@ static void PhysicsTick(float dt)
 
             // Projectile hits asteroid - split
 			// TODO: This feels dumb, should just do the split on server and just spawn the new asteroids
-            if((objA->objectType==ENTITYOBJECTTYPE_PROJECTILE&&objB->objectType==ENTITYOBJECTTYPE_FIELD)||
-               (objB->objectType==ENTITYOBJECTTYPE_PROJECTILE&&objA->objectType==ENTITYOBJECTTYPE_FIELD))
-            {
-                Entity_t *asteroid=(objA->objectType==ENTITYOBJECTTYPE_FIELD)?objA:objB;
+            // if((objA->objectType==ENTITYOBJECTTYPE_PROJECTILE&&objB->objectType==ENTITYOBJECTTYPE_FIELD)||
+            //    (objB->objectType==ENTITYOBJECTTYPE_PROJECTILE&&objA->objectType==ENTITYOBJECTTYPE_FIELD))
+            // {
+            //     Entity_t *asteroid=(objA->objectType==ENTITYOBJECTTYPE_FIELD)?objA:objB;
 
-                uint32_t rngSnapshot=GetRandomSeed();
-                uint32_t asteroidIndex=UINT32_MAX;
+            //     uint32_t rngSnapshot=GetRandomSeed();
+            //     uint32_t asteroidIndex=UINT32_MAX;
 
-                for(uint32_t k=0;k<numAsteroids;k++)
-                {
-                    if(asteroid->body==&asteroids[k])
-                    {
-                        asteroidIndex=k;
-                        break;
-                    }
-                }
+            //     for(uint32_t k=0;k<numAsteroids;k++)
+            //     {
+            //         if(asteroid->body==&asteroids[k])
+            //         {
+            //             asteroidIndex=k;
+            //             break;
+            //         }
+            //     }
 
-                if(asteroidIndex==UINT32_MAX)
-                    continue;
+            //     if(asteroidIndex==UINT32_MAX)
+            //         continue;
 
-                uint32_t parentID=asteroid->ID;
+            //     uint32_t parentID=asteroid->ID;
 
-                SplitAsteroid(asteroidIndex, manifold->contacts[j], impactSpeed);
+            //     SplitAsteroid(asteroidIndex, manifold->contacts[j], impactSpeed);
 
-                NetEvent_t ev={ .type=NETEVENT_SPLIT, .split={ .parentID=parentID, .rngSnapshot=rngSnapshot, .contactPoint=manifold->contacts[j].position, .contactNormal=manifold->contacts[j].normal, .impactSpeed=impactSpeed } };
-                ServerNetwork_BroadcastEvent(&ev);
-            }
+            //     NetEvent_t ev={ .type=NETEVENT_SPLIT, .split={ .parentID=parentID, .rngSnapshot=rngSnapshot, .contactPoint=manifold->contacts[j].position, .contactNormal=manifold->contacts[j].normal, .impactSpeed=impactSpeed } };
+            //     ServerNetwork_BroadcastEvent(&ev);
+            // }
         }
     }
 
     EntityList_Rebuild(&entityList);
-    EntityList_RecalculateBounds(&entityList);
 }
 
 // ============================================================
@@ -203,8 +265,6 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    memset(playerBodies, 0, sizeof(playerBodies));
-
     uint16_t port=SERVER_PORT;
     uint32_t seed=(uint32_t)GetClock();
 
@@ -217,7 +277,39 @@ int main(int argc, char **argv)
     signal(SIGINT, HandleSignal);
     signal(SIGTERM, HandleSignal);
 
-    DBGPRINTF(DEBUG_INFO, "vkEngine Dedicated Server\nPort: %d  Seed: %u\n", port, seed);
+    memset(playerBodies, 0, sizeof(playerBodies));
+
+	for(uint32_t i=0;i<MAX_EMITTERS;i++)
+	{
+		emitters[i].life=-1.0f;		// No life
+
+		const float radius=0.5f;
+		const float mass=(1.0f/3000.0f)*(1.33333333f*PI*10.0f)*10.0f;
+		const float inertia=0.4f*mass*(10.0f*10.0f);
+
+		emitters[i].body=(RigidBody_t)
+		{
+			.position=Vec3b(0.0f),
+
+			.velocity=Vec3b(0.0f),
+			.force=Vec3b(0.0f),
+			.mass=mass,
+			.invMass=1.0f/mass,
+
+			.orientation=Vec4(0.0f, 0.0f, 0.0f, 1.0f),
+			.angularVelocity=Vec3b(0.0f),
+			.inertia=inertia,
+			.invInertia=1.0f/inertia,
+
+			.restitution=1.0f,
+			.friction=0.0f,
+
+			.type=RIGIDBODY_SPHERE,
+			.radius=radius,
+		};
+	}
+
+	DBGPRINTF(DEBUG_INFO, "vkEngine Dedicated Server\nPort: %d  Seed: %u\n", port, seed);
 
     if(!EntityList_Init(&entityList))
     {

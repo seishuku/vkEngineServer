@@ -12,7 +12,7 @@
 extern EntityList_t entityList;
 matrix AsteroidTransform(const RigidBody_t *body);
 
-uint32_t numAsteroids=5000;
+uint32_t numAsteroids=1000;
 RigidBody_t asteroids[MAX_ASTEROIDS];
 
 AsteroidModel_t asteroidModels[MAX_ASTEROIDS];

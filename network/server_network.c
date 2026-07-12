@@ -12,6 +12,7 @@
 
 extern uint32_t AddPlayer(uint32_t clientID);
 extern void RemovePlayer(uint32_t clientID, uint32_t entityID);
+extern uint32_t AddServerEmitter(vec3 position, vec3 velocity, float life);
 
 // Internal state
 static Socket_t			serverSocket=-1;
@@ -90,7 +91,11 @@ static void RemoveClient(ServerClient_t *client)
     // Broadcast event
     if(client->playerEntityID!=NET_INVALID_ID)
     {
-        NetEvent_t ev={ .type=NETEVENT_DESTROY, .destroy={ .id=client->playerEntityID } };
+        NetEvent_t ev=
+		{
+			.type=NETEVENT_DESTROY,
+			.destroy={ .id=client->playerEntityID }
+		};
 
         for(uint32_t i=0;i<NET_MAX_CLIENTS;i++)
         {
@@ -122,7 +127,7 @@ static bool EntityNeedsUpdate(ServerClient_t *client, const Entity_t *entity)
 	if(Vec3_LengthSq(Vec3_Subv(entity->body->angularVelocity, delta->lastSentAngularVelocity))>NET_VELOCITY_EPSILON*NET_VELOCITY_EPSILON)
         return true;
 
-    if(1.0f-fabsf(Vec4_Dot(entity->body->orientation, delta->lastSentOrientation))<NET_ORIENTATION_EPSILON)
+    if(fabsf(Vec4_Dot(entity->body->orientation, delta->lastSentOrientation))<NET_ORIENTATION_EPSILON)
         return true;
 
     return false;
@@ -171,7 +176,13 @@ static void SendEntityUpdates(ServerClient_t *client)
 
             if(EntityNeedsUpdate(client, entity))
             {
-                NetEntityUpdate_t u={ .id=entity->ID, .position=entity->body->position, .velocity=entity->body->velocity, .orientation=entity->body->orientation };
+                NetEntityUpdate_t u=
+				{
+					.id=entity->ID,
+					.position=entity->body->position,
+					.velocity=entity->body->velocity,
+					.orientation=entity->body->orientation
+				};
                 NetEntityUpdate_Serialize(&pBuffer, &u);
                 MarkEntitySent(client, entity);
                 batchCount++;
@@ -231,7 +242,14 @@ static void SendPlayerStates(ServerClient_t *client, double now)
         if(!clients[i].active)
             continue;
 
-        NetPlayerState_t p={ .clientID=clients[i].id, .serverTick=serverTick, .position=clients[i].position, .velocity=clients[i].velocity, .orientation=clients[i].orientation };
+        NetPlayerState_t p=
+		{
+			.clientID=clients[i].id,
+			.serverTick=serverTick,
+			.position=clients[i].position,
+			.velocity=clients[i].velocity,
+			.orientation=clients[i].orientation
+		};
         NetPlayerState_Serialize(&pBuffer, &p);
     }
 
@@ -269,7 +287,20 @@ static void HandleConnect(uint32_t address, uint16_t port, double now)
     // Notify existing clients of new player
     if(client->playerEntityID!=NET_INVALID_ID)
     {
-        NetEvent_t ev={ .type=NETEVENT_SPAWN, .spawn={ .id=client->playerEntityID, .objectType=ENTITYOBJECTTYPE_PLAYER, .variant=client->id, .position=Vec3b(0.0f), .velocity=Vec3b(0.0f), .orientation=Vec4(0.0f, 0.0f, 0.0f, 1.0f), .radius=10.0f } };
+        NetEvent_t ev=
+		{
+			.type=NETEVENT_SPAWN,
+			.spawn=
+			{
+				.id=client->playerEntityID,
+				.objectType=ENTITYOBJECTTYPE_PLAYER,
+				.variant=client->id,
+				.position=Vec3b(0.0f),
+				.velocity=Vec3b(0.0f),
+				.orientation=Vec4(0.0f, 0.0f, 0.0f, 1.0f),
+				.radius=10.0f
+			}
+		};
 
         for(uint32_t i=0;i<NET_MAX_CLIENTS;i++)
         {
@@ -287,7 +318,7 @@ static void HandleConnect(uint32_t address, uint16_t port, double now)
 
         uint32_t batchSize=entityList->entityCount-sent;
 
-		if(batchSize>NET_SNAPSHOT_BATCH)
+        if(batchSize>NET_SNAPSHOT_BATCH)
             batchSize=NET_SNAPSHOT_BATCH;
 
         Serialize_uint32(&pBuffer, NETMAGIC_SNAPSHOT);
@@ -297,7 +328,16 @@ static void HandleConnect(uint32_t address, uint16_t port, double now)
         {
             const Entity_t *entity=&entityList->entities[sent+i];
 
-            NetSnapshotEntry_t e={ .id=entity->ID, .objectType=entity->objectType, .variant=entity->modelID, .position=entity->body->position, .velocity=entity->body->velocity, .orientation=entity->body->orientation, .radius=entity->body->radius };
+            NetSnapshotEntry_t e=
+			{
+				.id=entity->ID,
+				.objectType=entity->objectType,
+				.variant=entity->modelID,
+				.position=entity->body->position,
+				.velocity=entity->body->velocity,
+				.orientation=entity->body->orientation,
+				.radius=entity->body->radius
+			};
             NetSnapshotEntry_Serialize(&pBuffer, &e);
 
             // Mark all snapshot entities as sent so delta compression won't re-send them
@@ -370,6 +410,75 @@ static void HandleAck(uint8_t **pBuffer, uint32_t address, uint16_t port)
     NetEventQueue_Ack(&client->eventQueue, ackSeq);
 }
 
+// Handle events sent from client to server (e.g. projectile spawn)
+static void HandleClientEvent(uint8_t **pBuffer, uint32_t address, uint16_t port)
+{
+    ServerClient_t *client=FindClient(address, port);
+
+    if(!client)
+        return;
+
+    NetEvent_t ev;
+
+    if(!NetEvent_Deserialize(pBuffer, &ev))
+    {
+        DBGPRINTF(DEBUG_WARNING, "HandleClientEvent: failed to deserialize event from client %d\n", client->id);
+        return;
+    }
+
+    switch(ev.type)
+    {
+        case NETEVENT_SPAWN:
+        {
+            if(ev.spawn.objectType!=ENTITYOBJECTTYPE_PROJECTILE)
+            {
+                DBGPRINTF(DEBUG_WARNING, "HandleClientEvent: client %d tried to spawn non-projectile\n", client->id);
+                break;
+            }
+
+            // Create authoritative projectile on server
+            uint32_t entityID=AddServerEmitter(ev.spawn.position, ev.spawn.velocity, ev.spawn.radius);
+
+            if(entityID==NET_INVALID_ID)
+                break;
+
+            // Broadcast to all clients
+            NetEvent_t spawnEv=
+			{
+				.type=NETEVENT_SPAWN,
+				.spawn=
+				{
+					.id=entityID,
+					.objectType=ENTITYOBJECTTYPE_PROJECTILE,
+					.variant=client->id,
+					.position=ev.spawn.position,
+					.velocity=ev.spawn.velocity,
+					.orientation=Vec4(0.0f, 0.0f, 0.0f, 1.0f),
+					.radius=ev.spawn.radius,
+				},
+			};
+
+            ServerNetwork_BroadcastEvent(&spawnEv);
+            break;
+        }
+
+        default:
+            DBGPRINTF(DEBUG_WARNING, "HandleClientEvent: unhandled event type %d from client %d\n", ev.type, client->id);
+            break;
+    }
+
+    // Send ACK back to client so it can retire the event from its retry queue
+	// TODO: If this fails to send, the client will retry and projectile duplication will happen.
+	//           Maybe just ditch this?
+	{
+		uint8_t *pBuffer=sendBuffer;
+		Serialize_uint32(&pBuffer, NETMAGIC_ACK);
+		Serialize_uint32(&pBuffer, ev.seq);
+		Network_SocketSend(serverSocket, sendBuffer, (uint32_t)(pBuffer-sendBuffer), client->address, client->port);
+	}
+}
+
+// ============================================================
 // Public API
 bool ServerNetwork_Init(uint16_t port, EntityList_t *list, uint32_t seed)
 {
@@ -464,6 +573,10 @@ void ServerNetwork_Update(double now)
                 HandleAck(&pBuffer, address, port);
                 break;
 
+            case NETMAGIC_EVENT:
+                HandleClientEvent(&pBuffer, address, port);
+                break;
+
             default:
                 DBGPRINTF(DEBUG_WARNING, "ServerNetwork_Update: unknown magic 0x%X from 0x%X:%d\n", magic, address, port);
                 break;
@@ -497,7 +610,15 @@ void ServerNetwork_SendPlayerImpulse(uint32_t playerEntityID, vec3 position, vec
         if(!clients[i].active||clients[i].playerEntityID!=playerEntityID)
             continue;
 
-        NetEvent_t ev={ .type=NETEVENT_IMPULSE, .impulse={ .position=position, .velocity=velocity } };
+        NetEvent_t ev=
+		{
+			.type=NETEVENT_IMPULSE,
+			.impulse=
+			{
+				.position=position,
+				.velocity=velocity
+			}
+		};
         NetEventQueue_Push(&clients[i].eventQueue, &ev);
         break;
     }
